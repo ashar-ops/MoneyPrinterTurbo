@@ -1,7 +1,10 @@
 import json
+import mimetypes
 import os.path
 import re
 from timeit import default_timer as timer
+
+import requests
 
 try:
     from faster_whisper import WhisperModel
@@ -142,6 +145,104 @@ def create(audio_file, subtitle_file: str = ""):
     with open(subtitle_file, "w", encoding="utf-8") as f:
         f.write(sub)
     logger.info(f"subtitle file created: {subtitle_file}")
+
+
+def create_deepgram(audio_file, subtitle_file: str = ""):
+    """Create an SRT file from Deepgram's word-level transcript timestamps."""
+    if not subtitle_file:
+        subtitle_file = f"{audio_file}.srt"
+
+    api_key = str(config.deepgram.get("api_key", "") or "").strip()
+    if not api_key:
+        logger.error("Deepgram API key is not set")
+        return ""
+
+    url = "https://api.deepgram.com/v1/listen"
+    params = {
+        "model": "nova-2",
+        "smart_format": "true",
+        "punctuate": "true",
+        "utterances": "true",
+        "words": "true",
+    }
+    content_type = mimetypes.guess_type(audio_file)[0] or "audio/mpeg"
+    headers = {
+        "Authorization": f"Token {api_key}",
+        "Content-Type": content_type,
+    }
+
+    try:
+        logger.info(f"start Deepgram subtitle transcription: {audio_file}")
+        with open(audio_file, "rb") as audio:
+            response = requests.post(
+                url,
+                params=params,
+                headers=headers,
+                data=audio,
+                timeout=120,
+            )
+        if response.status_code != 200:
+            logger.error(
+                f"Deepgram subtitle transcription failed with status "
+                f"{response.status_code}: {response.text[:200]}"
+            )
+            return ""
+        payload = response.json()
+    except (OSError, ValueError, requests.RequestException) as exc:
+        logger.error(f"Deepgram subtitle transcription failed: {exc}")
+        return ""
+
+    try:
+        words = payload["results"]["channels"][0]["alternatives"][0]["words"]
+    except (KeyError, IndexError, TypeError) as exc:
+        logger.error(f"Deepgram response does not contain word timestamps: {exc}")
+        return ""
+
+    captions = []
+    caption_words = []
+    caption_start = None
+    caption_end = None
+
+    for word_data in words:
+        if not isinstance(word_data, dict):
+            continue
+        word = str(word_data.get("punctuated_word") or word_data.get("word") or "").strip()
+        try:
+            word_start = float(word_data["start"])
+            word_end = float(word_data["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not word:
+            continue
+
+        if caption_start is None:
+            caption_start = word_start
+        caption_words.append(word)
+        caption_end = word_end
+
+        if utils.str_contains_punctuation(word[-1]):
+            captions.append((" ".join(caption_words).strip(), caption_start, caption_end))
+            caption_words = []
+            caption_start = None
+            caption_end = None
+
+    if caption_words and caption_start is not None and caption_end is not None:
+        captions.append((" ".join(caption_words).strip(), caption_start, caption_end))
+
+    if not captions:
+        logger.warning("Deepgram returned no usable subtitle captions")
+        return ""
+
+    try:
+        os.makedirs(os.path.dirname(subtitle_file), exist_ok=True) if os.path.dirname(subtitle_file) else None
+        with open(subtitle_file, "w", encoding="utf-8") as subtitle:
+            for index, (text, start, end) in enumerate(captions, start=1):
+                subtitle.write(utils.text_to_srt(index, text, start, end))
+        logger.info(f"Deepgram subtitle file created: {subtitle_file}")
+        return subtitle_file
+    except OSError as exc:
+        logger.error(f"failed to write Deepgram subtitle file: {exc}")
+        return ""
 
 
 def file_to_subtitles(filename):

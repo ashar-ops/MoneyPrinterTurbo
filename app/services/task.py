@@ -573,7 +573,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         logger.info("subtitle provider is empty, skip subtitle generation")
         return ""
 
-    if sub_maker is None and subtitle_provider != "whisper":
+    if sub_maker is None and subtitle_provider not in {"whisper", "deepgram"}:
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
         # sub_maker 时间轴。只有 Whisper 可以直接从音频文件转写字幕；
         # 其他字幕提供方继续保持原有行为，避免生成错误的空时间轴。
@@ -597,6 +597,9 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
                 "skip subtitles without falling back to whisper"
             )
             return ""
+
+    if subtitle_provider == "deepgram":
+        subtitle.create_deepgram(audio_file=audio_file, subtitle_file=subtitle_path)
 
     if subtitle_provider == "whisper":
         subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
