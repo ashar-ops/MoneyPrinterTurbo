@@ -408,6 +408,13 @@ model_id = "chatterbox"
 # Voice names exposed by the configured Chatterbox server.
 voices = ["default-Female"]
 
+[deepgram]
+# Deepgram Aura TTS service: https://console.deepgram.com/
+api_key = ""
+# Aura model, for example: aura-2-thalia-en
+# See https://developers.deepgram.com/docs/tts-models for available models.
+tts_model = "aura-2-thalia-en"
+
 [fish_audio]
 # Fish Audio TTS service: https://fish.audio
 # API key: https://fish.audio/app/developers

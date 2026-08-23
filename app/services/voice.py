@@ -221,6 +221,11 @@ def get_chatterbox_voices() -> list[str]:
     return result
 
 
+def get_deepgram_voices() -> list[str]:
+    """Return the fixed voice selector entry for Deepgram Aura."""
+    return ["deepgram:default"]
+
+
 def get_fish_audio_voices() -> list[str]:
     """Return configured Fish Audio voices.
 
@@ -327,6 +332,10 @@ def is_minimax_voice(voice_name: str | None) -> bool:
 
 def is_elevenlabs_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("elevenlabs:")
+
+
+def is_deepgram_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("deepgram:")
 
 
 def get_elevenlabs_api_key() -> str:
@@ -531,6 +540,8 @@ def tts(
         else:
             logger.error(f"Invalid elevenlabs voice name format: {voice_name}")
             return None
+    elif is_deepgram_voice(voice_name):
+        return deepgram_tts(text, voice_file, voice_rate, voice_volume)
     elif is_chatterbox_voice(voice_name):
         # 格式: chatterbox:<voice>，voice 可带显示用的 -Female/-Male 后缀
         parts = voice_name.split(":", 1)
@@ -1698,6 +1709,72 @@ def elevenlabs_tts(
             )
         except Exception as e:
             logger.error(f"elevenlabs tts failed: {str(e)}")
+
+    return None
+
+
+def deepgram_tts(
+    text: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """Generate speech with Deepgram Aura and save it to ``voice_file``."""
+    text = (text or "").strip()
+    if not text:
+        logger.error("Deepgram TTS text is empty")
+        return None
+
+    api_key = str(config.deepgram.get("api_key", "") or "").strip()
+    model = str(config.deepgram.get("tts_model", "aura-2-thalia-en") or "").strip()
+    if not api_key:
+        logger.error("Deepgram API key is not set")
+        return None
+    if not model:
+        logger.error("Deepgram TTS model is not set")
+        return None
+
+    url = "https://api.deepgram.com/v1/speak"
+    headers = {
+        "Authorization": f"Token {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    for i in range(3):
+        try:
+            logger.info(f"start deepgram tts, model: {model}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+            response = requests.post(
+                url,
+                params={"model": model},
+                json={"text": text},
+                headers=headers,
+                timeout=60,
+            )
+            if response.status_code != 200:
+                logger.error(
+                    f"deepgram tts failed with status {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+                continue
+            if not response.content:
+                logger.error("Deepgram TTS returned empty audio data")
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+            logger.success(f"deepgram tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=ensure_legacy_submaker_fields(SubMaker()),
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"deepgram tts failed: {str(e)}")
 
     return None
 

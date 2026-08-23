@@ -139,6 +139,7 @@ _RUNTIME_CONFIG_SECTIONS = {
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
     "fish_audio": config.fish_audio,
+    "deepgram": config.deepgram,
     "ui": config.ui,
 }
 # 设置预设与密钥备份使用各自的文件标识。导入时先校验 schema 和版本，
@@ -1163,6 +1164,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "minimax-tts"
     if voice.is_elevenlabs_voice(voice_name):
         return "elevenlabs"
+    if voice.is_deepgram_voice(voice_name):
+        return "deepgram"
     if voice.is_chatterbox_voice(voice_name):
         return "chatterbox"
     if voice.is_fish_audio_voice(voice_name):
@@ -4010,6 +4013,11 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
             "model_id": config.elevenlabs.get("model_id", ""),
             "credential": _credential_signature(config.elevenlabs.get("api_key", "")),
         }
+    if tts_server == "deepgram":
+        return {
+            "tts_model": config.deepgram.get("tts_model", ""),
+            "credential": _credential_signature(config.deepgram.get("api_key", "")),
+        }
     if tts_server == "chatterbox":
         return {
             "base_url": config.chatterbox.get("base_url", ""),
@@ -4775,6 +4783,7 @@ def _render_audio_settings(panel, params):
                 ("mimo-tts", "Xiaomi MiMo TTS"),
                 ("minimax-tts", "MiniMax TTS"),
                 ("elevenlabs", "ElevenLabs TTS"),
+                ("deepgram", "Deepgram Aura TTS"),
                 ("chatterbox", "Chatterbox TTS"),
                 ("fish_audio", "Fish Audio TTS"),
             ]
@@ -4832,6 +4841,8 @@ def _render_audio_settings(panel, params):
                 filtered_voices = voice.get_mimo_voices()
             elif selected_tts_server == "minimax-tts":
                 filtered_voices = minimax_voices
+            elif selected_tts_server == "deepgram":
+                filtered_voices = voice.get_deepgram_voices()
             elif selected_tts_server == "elevenlabs":
                 # 音色列表位于 Key 输入框之前渲染，必须先统一恢复重连状态并读取
                 # 配置/环境变量，否则页面会用空 Key 加载并缓存空音色列表。
@@ -5063,6 +5074,26 @@ def _render_audio_settings(panel, params):
                     key="elevenlabs_model_select",
                 )
                 _set_runtime_config("elevenlabs", "model_id", elevenlabs_model)
+
+            # Deepgram API settings section
+            if tts_mode_enabled and (
+                selected_tts_server == "deepgram"
+                or (voice_name and voice.is_deepgram_voice(voice_name))
+            ):
+                deepgram_api_key = st.text_input(
+                    "Deepgram API Key",
+                    value=config.deepgram.get("api_key", ""),
+                    type="password",
+                    key="deepgram_api_key_input",
+                )
+                _set_runtime_config("deepgram", "api_key", deepgram_api_key)
+
+                deepgram_model = st.text_input(
+                    "Deepgram Aura Model",
+                    value=config.deepgram.get("tts_model", "aura-2-thalia-en"),
+                    key="deepgram_tts_model_input",
+                )
+                _set_runtime_config("deepgram", "tts_model", deepgram_model.strip())
 
             # Fish Audio API settings section
             if tts_mode_enabled and (
