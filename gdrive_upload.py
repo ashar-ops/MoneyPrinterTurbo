@@ -59,7 +59,7 @@ def get_credentials():
     flow = InstalledAppFlow.from_client_secrets_file(
         str(CLIENT_SECRETS_FILE), DRIVE_SCOPES
     )
-    credentials = flow.run_local_server(port=8080)
+    credentials = flow.run_local_server(port=8090, open_browser=False)
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
     return credentials
