@@ -237,7 +237,11 @@ def create_deepgram(audio_file, subtitle_file: str = ""):
         os.makedirs(os.path.dirname(subtitle_file), exist_ok=True) if os.path.dirname(subtitle_file) else None
         with open(subtitle_file, "w", encoding="utf-8") as subtitle:
             for index, (text, start, end) in enumerate(captions, start=1):
-                subtitle.write(utils.text_to_srt(index, text, start, end))
+                # text_to_srt's legacy template has trailing indentation; strip it
+                # here so it cannot prefix the next Deepgram SRT block.
+                subtitle.write(
+                    utils.text_to_srt(index, text, start, end).rstrip() + "\n\n"
+                )
         logger.info(f"Deepgram subtitle file created: {subtitle_file}")
         return subtitle_file
     except OSError as exc:
