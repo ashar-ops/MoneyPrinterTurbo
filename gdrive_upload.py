@@ -3,9 +3,10 @@
 
 Requirements:
     pip install --break-system-packages google-api-python-client google-auth
+    pip install --break-system-packages google-auth-oauthlib
 
-The service account key is expected at ~/MoneyPrinterTurbo/gdrive-key.json.
-The target Drive folder must be shared with the service account.
+The OAuth client secrets file is expected at ~/MoneyPrinterTurbo/credentials.json.
+The target Drive folder must be accessible by the authenticated Google account.
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ import sys
 from pathlib import Path
 
 
-SERVICE_ACCOUNT_KEY = Path("~/MoneyPrinterTurbo/gdrive-key.json").expanduser()
+CLIENT_SECRETS_FILE = Path("~/MoneyPrinterTurbo/credentials.json").expanduser()
+TOKEN_FILE = Path("~/MoneyPrinterTurbo/token.json").expanduser()
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 
@@ -30,9 +32,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def get_credentials():
+    """Load saved OAuth credentials, refreshing them silently when possible."""
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    if TOKEN_FILE.is_file():
+        credentials = Credentials.from_authorized_user_file(
+            str(TOKEN_FILE), DRIVE_SCOPES
+        )
+        if credentials.expired:
+            if not credentials.refresh_token:
+                raise RuntimeError(
+                    f"saved token is expired and has no refresh token: {TOKEN_FILE}"
+                )
+            credentials.refresh(Request())
+            TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
+        return credentials
+
+    if not CLIENT_SECRETS_FILE.is_file():
+        raise FileNotFoundError(
+            f"OAuth client secrets file does not exist: {CLIENT_SECRETS_FILE}"
+        )
+
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(CLIENT_SECRETS_FILE), DRIVE_SCOPES
+    )
+    credentials = flow.run_local_server(port=8080)
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
+    return credentials
+
+
 def upload_file(local_file: Path, folder_id: str) -> str:
     """Upload *local_file* and return its Drive file ID on success."""
-    from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 
@@ -40,14 +74,8 @@ def upload_file(local_file: Path, folder_id: str) -> str:
         raise FileNotFoundError(f"local file does not exist: {local_file}")
     if not folder_id.strip():
         raise ValueError("Google Drive folder ID must not be empty")
-    if not SERVICE_ACCOUNT_KEY.is_file():
-        raise FileNotFoundError(
-            f"service account key does not exist: {SERVICE_ACCOUNT_KEY}"
-        )
 
-    credentials = Credentials.from_service_account_file(
-        str(SERVICE_ACCOUNT_KEY), scopes=DRIVE_SCOPES
-    )
+    credentials = get_credentials()
     drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
     mime_type = mimetypes.guess_type(local_file.name)[0] or "application/octet-stream"
