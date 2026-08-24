@@ -492,6 +492,7 @@ def save_config():
     with _config_save_lock:
         config_to_save = dict(_cfg)
         config_to_save["app"] = dict(app)
+        config_to_save["sheets"] = dict(sheets)
         config_to_save["azure"] = dict(azure)
         config_to_save["siliconflow"] = dict(siliconflow)
         config_to_save["minimax_tts"] = dict(minimax_tts)
@@ -547,6 +548,15 @@ def save_config():
 
 _cfg = load_config()
 app = _SynchronizedConfig(_cfg.get("app", {}))
+app.setdefault("script_examples_file", "resource/script_examples.txt")
+app.setdefault("script_refinement_enabled", True)
+app.setdefault("script_refinement_min_rating", 8)
+app.setdefault("script_refinement_max_attempts", 3)
+app.setdefault("thumbnail_enabled", True)
+sheets = _SynchronizedConfig(_cfg.get("sheets", {}))
+sheets.setdefault("enabled", False)
+sheets.setdefault("tracking_id", "")
+sheets.setdefault("service_account_file", "sheets-key.json")
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _SynchronizedConfig(_cfg.get("azure", {}))

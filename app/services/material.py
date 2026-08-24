@@ -305,8 +305,12 @@ def search_videos_pexels(
         "Authorization": api_key,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
     }
+    # Pexels supports free-text exclusion poorly, but these negative terms reduce
+    # unwanted people in results while the metadata check below remains authoritative.
+    negative_terms = ["-woman", "-female", "-girl", "-lady", "-women"]
+    filtered_search_term = " ".join([search_term, *negative_terms])
     # Build URL
-    params = {"query": search_term, "per_page": 20, "orientation": video_orientation}
+    params = {"query": filtered_search_term, "per_page": 20, "orientation": video_orientation}
     query_url = f"https://api.pexels.com/v1/videos/search?{urlencode(params)}"
     logger.info(f"searching videos on pexels: term={search_term!r}")
 
@@ -324,8 +328,16 @@ def search_videos_pexels(
             logger.error("pexels video search returned an unsupported response")
             return video_items
         videos = response["videos"]
-        # loop through each video in the result
+        blocked_terms = ("woman", "female", "girl", "lady", "women")
+        # Reject results using all available Pexels metadata before download.
         for v in videos:
+            metadata = " ".join(
+                str(v.get(field, "")) for field in ("url", "name", "description", "tags")
+            )
+            metadata += " " + str(v.get("user", ""))
+            if any(term in metadata.lower() for term in blocked_terms):
+                logger.info(f"rejecting Pexels result with blocked metadata: {v.get('id')}")
+                continue
             duration = v["duration"]
             # check if video has desired minimum duration
             if duration < minimum_duration:
@@ -1239,6 +1251,14 @@ def download_videos(
                 video_url=item.url, save_dir=material_directory
             )
             if saved_video_path:
+                blocked_terms = ("woman", "female", "girl", "lady", "women")
+                if source == "pexels" and any(
+                    term in os.path.basename(saved_video_path).lower()
+                    for term in blocked_terms
+                ):
+                    logger.info(f"rejecting downloaded Pexels filename: {saved_video_path}")
+                    delete_files(saved_video_path)
+                    continue
                 logger.info(f"video saved: {saved_video_path}")
                 video_paths.append(saved_video_path)
                 try:

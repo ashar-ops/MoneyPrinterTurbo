@@ -1,5 +1,7 @@
+import ast
 import json
 import logging
+import os
 import re
 from time import perf_counter
 from typing import List
@@ -500,6 +502,28 @@ def build_script_prompt(
     return prompt
 
 
+def get_script_examples(app_config=None) -> str:
+    """Load optional few-shot examples; missing files are a normal fallback."""
+    runtime_config = app_config if app_config is not None else config.app
+    configured_path = runtime_config.get(
+        "script_examples_file", "resource/script_examples.txt"
+    )
+    examples_path = str(configured_path or "").strip()
+    if not examples_path:
+        return ""
+    if not os.path.isabs(examples_path):
+        examples_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))),
+            examples_path,
+        )
+    try:
+        with open(examples_path, encoding="utf-8") as examples_file:
+            return examples_file.read().strip()
+    except (OSError, UnicodeError) as exc:
+        logger.debug(f"script examples unavailable: {exc}")
+        return ""
+
+
 def generate_script(
     video_subject: str,
     language: str = "",
@@ -522,6 +546,12 @@ def generate_script(
         video_script_prompt=video_script_prompt,
         custom_system_prompt=custom_system_prompt,
     )
+    examples = get_script_examples(app_config)
+    if examples:
+        prompt = (
+            "Use these examples as style references. Match their tone, structure, and pacing.\n\n"
+            "SCRIPT EXAMPLES:\n" + examples + "\n\n" + prompt
+        )
     final_script = ""
     logger.info(
         "generating video script: "
@@ -576,6 +606,84 @@ def generate_script(
     else:
         logger.success(f"completed: \n{final_script}")
     return final_script.strip()
+
+
+def analyze_script(script: str, app_config=None) -> dict:
+    """Rate a script and return normalized scores, or a neutral failed rating."""
+    prompt = (
+        "Rate this YouTube Shorts script from 1-10 on: hook_strength, engagement, "
+        "conversational_tone, viral_potential. Return ONLY JSON: "
+        "{'hook_strength': X, 'engagement': X, 'conversational_tone': X, "
+        "'viral_potential': X, 'average': X, 'feedback': 'specific improvement suggestions'}\n\n"
+        f"SCRIPT:\n{script}"
+    )
+    raw = ""
+    try:
+        raw = _generate_response(prompt, app_config=app_config) if app_config is not None else _generate_response(prompt)
+        parsed = json.loads(_strip_code_fence(raw))
+    except (ValueError, TypeError, json.JSONDecodeError, SyntaxError):
+        try:
+            parsed = ast.literal_eval(_strip_code_fence(raw))
+        except Exception:
+            return {"average": 0.0, "feedback": "Unable to analyze script."}
+    try:
+        scores = [float(parsed.get(key, 0)) for key in (
+            "hook_strength", "engagement", "conversational_tone", "viral_potential"
+        )]
+        parsed["average"] = float(parsed.get("average", sum(scores) / 4))
+    except (AttributeError, TypeError, ValueError):
+        return {"average": 0.0, "feedback": "Unable to analyze script."}
+    parsed["feedback"] = str(parsed.get("feedback", ""))
+    return parsed
+
+
+def generate_script_with_refinement(
+    video_subject, paragraph_number, custom_prompt, custom_system_prompt,
+    language="", app_config=None,
+) -> str:
+    """Generate up to the configured number of increasingly refined scripts."""
+    runtime_config = app_config if app_config is not None else config.app
+    if not runtime_config.get("script_refinement_enabled", True):
+        return generate_script(video_subject, language, paragraph_number, custom_prompt, custom_system_prompt, runtime_config)
+    minimum = float(runtime_config.get("script_refinement_min_rating", 8))
+    attempts = max(1, int(runtime_config.get("script_refinement_max_attempts", 3)))
+    best_script, best_rating, feedback = "", -1.0, ""
+    for attempt in range(attempts):
+        prompt = custom_prompt or ""
+        if feedback:
+            prompt += f"\n\nPrevious attempt feedback: {feedback}. Improve based on this."
+        candidate = generate_script(video_subject, language, paragraph_number, prompt, custom_system_prompt, runtime_config)
+        if not candidate:
+            continue
+        rating = analyze_script(candidate, runtime_config)
+        score = float(rating.get("average", 0))
+        if score > best_rating:
+            best_script, best_rating = candidate, score
+        if score >= minimum or attempt == attempts - 1:
+            break
+        feedback = rating.get("feedback", "")
+    return best_script
+
+
+def generate_title(script: str, topic: str, app_config=None) -> str:
+    prompt = ("Generate a YouTube Shorts title (max 60 chars) for this script. Start with a number "
+              "or question. Create curiosity. Avoid clickbait that doesn't deliver. Return ONLY the title, no quotes.\n"
+              f"Topic: {topic}\nScript: {script}")
+    result = _generate_response(prompt, app_config=app_config) if app_config is not None else _generate_response(prompt)
+    return result.strip().strip('"\'')[:60]
+
+
+def generate_hashtags(topic: str, script: str, app_config=None) -> list[str]:
+    prompt = ("Generate 5-10 relevant hashtags for this YouTube Shorts video. Mix popular (#shorts, #viral) "
+              "with niche-specific tags. Return as comma-separated list without # symbols.\n"
+              f"Topic: {topic}\nScript: {script}")
+    result = _generate_response(prompt, app_config=app_config) if app_config is not None else _generate_response(prompt)
+    tags = []
+    for tag in result.split(","):
+        tag = re.sub(r"[^\w\- ]", "", tag, flags=re.UNICODE).strip().replace(" ", "")
+        if tag and f"#{tag}" not in tags:
+            tags.append(f"#{tag}")
+    return tags[:10]
 
 
 def _strip_code_fence(text: str) -> str:

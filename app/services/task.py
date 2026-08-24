@@ -23,6 +23,7 @@ from app.services import (
     sonilo,
     subtitle,
     task_artifacts,
+    sheets_tracker,
     twelvelabs,
     video,
     voice,
@@ -281,6 +282,11 @@ def _mark_task_failed(
         error=failure["error"],
         **failure_details,
     )
+    try:
+        topic = (existing_task or {}).get("video_subject", "")
+        sheets_tracker.track_video_failure(topic, message)
+    except Exception as exc:
+        logger.warning(f"failed to track task failure: {exc}")
     return failure
 
 
@@ -288,11 +294,11 @@ def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
     if not video_script:
-        video_script = llm.generate_script(
+        video_script = llm.generate_script_with_refinement(
             video_subject=params.video_subject,
             language=params.video_language,
             paragraph_number=params.paragraph_number,
-            video_script_prompt=params.video_script_prompt,
+            custom_prompt=params.video_script_prompt,
             custom_system_prompt=params.custom_system_prompt,
         )
     else:
@@ -1222,7 +1228,12 @@ def _run_pipeline(
     allow_server_file_input: bool = False,
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=5,
+        video_subject=params.video_subject,
+    )
 
     # 只有完整成片流程需要视频配乐供应商。尽早阻止缺少 Key 的完整任务，避免
     # 先消耗 LLM、TTS 和素材服务额度；中间产物接口仍可独立使用。
@@ -1285,13 +1296,21 @@ def _run_pipeline(
         )
         return _mark_task_failed(task_id, "script", error)
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
+    title = ""
+    hashtags = []
+    try:
+        title = llm.generate_title(video_script, params.video_subject)
+        hashtags = llm.generate_hashtags(params.video_subject, video_script)
+    except Exception as exc:
+        logger.warning(f"failed to generate social metadata: {exc}")
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10, title=title, hashtags=hashtags)
 
     if stop_at == "script":
         sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
+            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script,
+            title=title, hashtags=hashtags
         )
-        return {"script": video_script}
+        return {"script": video_script, "title": title, "hashtags": hashtags}
 
     # 2. Generate terms
     video_terms = ""
@@ -1310,7 +1329,12 @@ def _run_pipeline(
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
         )
-        return {"script": video_script, "terms": video_terms}
+        return {
+            "script": video_script,
+            "terms": video_terms,
+            "title": title,
+            "hashtags": hashtags,
+        }
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
@@ -1430,6 +1454,8 @@ def _run_pipeline(
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
         "script": video_script,
+        "title": title,
+        "hashtags": hashtags,
         "terms": video_terms,
         "audio_file": audio_file,
         "audio_duration": audio_duration,
@@ -1444,6 +1470,12 @@ def _run_pipeline(
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
+    try:
+        sheets_tracker.track_video_success(
+            params.video_subject, video_script, audio_duration, ""
+        )
+    except Exception as exc:
+        logger.warning(f"failed to track task success: {exc}")
 
     if should_cross_post:
         scheduling_error = _schedule_cross_post(

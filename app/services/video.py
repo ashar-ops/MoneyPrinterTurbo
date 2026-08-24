@@ -1203,6 +1203,9 @@ def generate_video(
             _open_video_clip_quietly(video_path)
         )
         voice_source_clip = clip_stack.enter_context(AudioFileClip(audio_path))
+        # Read the source narration duration from the media file itself rather than
+        # relying on an estimated duration passed by the caller.
+        audio_duration = float(voice_source_clip.duration or 0)
         video_clip = source_video_clip
         audio_clip = voice_source_clip.with_effects(
             [afx.MultiplyVolume(params.voice_volume)]
@@ -1277,14 +1280,17 @@ def generate_video(
                     f"file={bgm_file}"
                 )
 
-        final_video_clip = video_clip.with_audio(audio_clip)
+        final_video_clip = video_clip.with_audio(audio_clip).with_duration(audio_duration)
         clip_stack.callback(final_video_clip.close)
         # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
         # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
         output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
+        # MoviePy performs the main render; a final FFmpeg pass applies exact
+        # end-of-program fades and trims at the measured narration duration.
+        prefade_output = output_file + ".prefade.mp4"
         _write_videofile_with_codec_fallback(
             final_video_clip,
-            output_file=output_file,
+            output_file=prefade_output,
             codec=_get_configured_video_codec(),
             audio_codec=audio_codec,
             audio_fps=output_audio_fps,
@@ -1294,6 +1300,21 @@ def generate_video(
             logger=None,
             fps=fps,
         )
+        fade_start = max(0.0, audio_duration - 1.0)
+        ffmpeg_command = [
+            utils.get_ffmpeg_binary(), "-y", "-i", prefade_output,
+            "-t", f"{audio_duration:.6f}",
+            "-vf", f"fade=t=out:st={fade_start:.6f}:d=1",
+            "-af", f"afade=t=out:st={fade_start:.6f}:d=1",
+            "-c:v", "libx264", "-c:a", audio_codec, "-pix_fmt", "yuv420p",
+            output_file,
+        ]
+        try:
+            result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "ffmpeg fade failed").strip())
+        finally:
+            delete_files(prefade_output)
         return bgm_mix_succeeded
 
 

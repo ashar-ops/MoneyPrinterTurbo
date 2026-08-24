@@ -30,7 +30,12 @@ until [ $SUCCESS -eq 1 ]; do
       --video-subject "$TOPIC" \
       --voice-name "deepgram:aura-2-zeus-en" \
       --video-script-prompt "$PROMPT" \
-      --video-clip-duration 3
+      --video-clip-duration 2 \
+      --font-name "Anton.ttf" \
+      --font-size 60 \
+      --text-fore-color "#FFFFFF" \
+      --stroke-color "#000000" \
+      --stroke-width 4.5
     
     if [ $? -eq 0 ]; then
         SUCCESS=1
