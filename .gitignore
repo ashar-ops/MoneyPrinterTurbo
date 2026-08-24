@@ -42,3 +42,26 @@ htmlcov/
 .codegraph
 /docs/superpowers
 .understand-anything
+
+# ---- MoneyPrinter backup rules ----
+# Real config with API keys (NEVER commit)
+config.toml
+# Keep the safe template
+!config.toml.template
+# Secrets / credentials
+*.env
+.env
+*service_account*.json
+*credentials*.json
+gdrive_upload.py
+# Generated runtime stuff
+storage/
+*.mp4
+*.mp3
+*.log
+
+# Force-ignore Drive secrets
+credentials.json
+gdrive-key.json
+token.json
+*.json
