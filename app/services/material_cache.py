@@ -20,7 +20,9 @@ from app.utils import utils
 
 
 MATERIAL_SEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60
-_CACHE_FORMAT_VERSION = 2
+# v3：source_info 白名单新增 thumbnail_url（视觉安全过滤需要缩略图地址），
+# 旧版本缓存缺少该字段，直接整体失效让下次搜索重新拉取。
+_CACHE_FORMAT_VERSION = 3
 _CACHE_CLEANUP_INTERVAL_SECONDS = 60 * 60
 _CACHE_FILE_PATTERN = re.compile(r"^[0-9a-f]{64}\.json$")
 
@@ -71,6 +73,12 @@ def _cached_source_info(item: MaterialInfo) -> dict | None:
         cached["asset_id"] = str(asset_id)
     if source_page:
         cached["source_page"] = source_page
+
+    # 缩略图是公开 CDN 地址，供视觉安全过滤拼网格使用；同样只保存剥离了
+    # 查询参数的公开 URL，防止任何签名参数进入磁盘缓存。
+    thumbnail_url = _safe_public_url(source.get("thumbnail_url"))
+    if thumbnail_url:
+        cached["thumbnail_url"] = thumbnail_url
 
     raw_creator = source.get("creator")
     if isinstance(raw_creator, dict):

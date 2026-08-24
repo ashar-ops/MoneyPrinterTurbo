@@ -49,6 +49,11 @@ class _FakeMoviePyClip:
     def with_audio(self, _audio):
         return self.with_audio_result
 
+    def with_duration(self, duration):
+        # video.generate_video 在混音后统一裁剪时长，fake 只需支持链式调用。
+        self.duration = duration
+        return self
+
 
 class TestVideoService(unittest.TestCase):
     def setUp(self):
@@ -135,6 +140,11 @@ class TestVideoService(unittest.TestCase):
             patch.object(vd, "CompositeAudioClip", return_value=mixed_audio),
             patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
             patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+            patch.object(
+                vd.subprocess,
+                "run",
+                return_value=vd.subprocess.CompletedProcess(args=[], returncode=0),
+            ),
         ):
             result = vd.generate_video(
                 video_path="combined.mp4",
@@ -177,6 +187,11 @@ class TestVideoService(unittest.TestCase):
             patch.object(vd, "CompositeAudioClip") as composite_audio,
             patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
             patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+            patch.object(
+                vd.subprocess,
+                "run",
+                return_value=vd.subprocess.CompletedProcess(args=[], returncode=0),
+            ),
             patch.object(vd.logger, "exception") as log_exception,
         ):
             result = vd.generate_video(
@@ -234,6 +249,11 @@ class TestVideoService(unittest.TestCase):
                     ) as writer,
                     patch.object(
                         vd, "_get_configured_video_codec", return_value="libx264"
+                    ),
+                    patch.object(
+                        vd.subprocess,
+                        "run",
+                        return_value=vd.subprocess.CompletedProcess(args=[], returncode=0),
                     ),
                 ):
                     result = vd.generate_video(
@@ -295,6 +315,11 @@ class TestVideoService(unittest.TestCase):
                     patch.object(vd, "_write_videofile_with_codec_fallback"),
                     patch.object(
                         vd, "_get_configured_video_codec", return_value="libx264"
+                    ),
+                    patch.object(
+                        vd.subprocess,
+                        "run",
+                        return_value=vd.subprocess.CompletedProcess(args=[], returncode=0),
                     ),
                 ):
                     result = vd.generate_video(

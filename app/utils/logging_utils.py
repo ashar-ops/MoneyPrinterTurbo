@@ -7,12 +7,23 @@ from loguru import logger
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 )
+
+# 终端日志采用三段式布局：时间 │ 级别徽章 │ 位置 › 消息。
+# - 时间与位置使用暗色/青色弱化，突出消息本体；
+# - 级别通过 <level> 标签自动按严重度着色（DEBUG 灰、INFO 蓝、SUCCESS 绿、
+#   WARNING 黄、ERROR 红），并带图标前缀，一眼可分辨动作类型；
+# - 消息同样套用 <level>，让整行保持级别颜色语义。
+# WebUI 复用同一格式但关闭 colorize，标记会被自动剥离为纯文本。
 LOG_RECORD_FORMAT = (
-    "<green>{time:%Y-%m-%d %H:%M:%S}</> | "
-    "<level>{level}</> | "
-    '"{file.path}:{line}":<blue> {function}</> '
-    "- <level>{message}</>\n"
+    "<dim>{time:%Y-%m-%d %H:%M:%S}</> <dim>│</> "
+    "<level>{level.icon}</> <level>{level: <7}</><dim>│</> "
+    "<cyan>{file.path}:{line}</> <dim>{function}()</> <blue>›</> "
+    "<level>{message}</>\n"
 )
+# 流水线阶段横幅宽度。任务日志里每个阶段用醒目的分隔块标出，
+# 方便在大量素材下载/合成日志中快速定位当前执行到哪一步。
+_STAGE_BAR = "━" * 64
+
 # Loguru 启动时默认终端 handler 的 ID 为 0。WebUI 重新加载时只能替换这个
 # 基础终端输出，不能调用 logger.remove() 清空全部 handler，否则正在运行任务
 # 用于收集 WebUI 日志的临时 sink 也会被删除。
@@ -37,6 +48,21 @@ def format_log_record(record):
     # 避免 WebUI 和终端因初始化入口不同而展示两套内容。
     record["message"] = record["message"].replace(PROJECT_ROOT, ".")
     return LOG_RECORD_FORMAT
+
+
+def log_stage(title: str, icon: str = "🎬") -> None:
+    """
+    输出流水线阶段横幅。
+
+    任务编排层的各阶段（脚本、配音、字幕、素材、合成……）都用这个入口打头，
+    让终端日志呈现清晰的分段结构；颜色标记在非彩色 sink 中会被剥离。
+    """
+    header = f"{icon + '  ' if icon else ''}{title}".strip()
+    logger.opt(depth=1).info(
+        f"\n<bold><cyan>{_STAGE_BAR}</></>\n"
+        f"<bold><cyan>▶ {header}</></>\n"
+        f"<bold><cyan>{_STAGE_BAR}</></>"
+    )
 
 
 def configure_terminal_logger(sink, level: str, colorize: bool = True) -> int:

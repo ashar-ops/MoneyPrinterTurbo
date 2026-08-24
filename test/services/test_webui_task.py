@@ -339,10 +339,11 @@ def test_worker_logs_are_available_without_streamlit_session_state():
     assert result == {"videos": ["/tmp/final-1.mp4"]}
     records = webui_task.get_task_logs(task_id)
     assert len(records) == 1
+    # 路径分隔符在 Windows 上是反斜杠，正则需同时兼容两种平台。
     assert re.fullmatch(
-        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| INFO \| "
-        r'"\./test/services/test_webui_task\.py:\d+": logged_start '
-        r"- unique background task log",
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} │ .*INFO\s*│ "
+        r"\./test[\\/]services[\\/]test_webui_task\.py:\d+ logged_start\(\) › "
+        r"unique background task log",
         records[0],
     )
 

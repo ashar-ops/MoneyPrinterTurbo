@@ -553,6 +553,11 @@ app.setdefault("script_refinement_enabled", True)
 app.setdefault("script_refinement_min_rating", 8)
 app.setdefault("script_refinement_max_attempts", 3)
 app.setdefault("thumbnail_enabled", True)
+# 视觉安全过滤（第二道防线）：默认启用，但未配置 gemini_api_key 时会自动
+# 降级为仅使用元数据关键词过滤。vision_safety_model 留空时复用 Gemini 主模型。
+app.setdefault("vision_safety_filter_enabled", True)
+app.setdefault("vision_safety_max_per_grid", 12)
+app.setdefault("vision_safety_model", "")
 sheets = _SynchronizedConfig(_cfg.get("sheets", {}))
 sheets.setdefault("enabled", False)
 sheets.setdefault("tracking_id", "")

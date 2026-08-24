@@ -1,9 +1,10 @@
 import os
 import random
+import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, List
+from typing import Any, Callable, Iterable, List
 from urllib.parse import quote_plus, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -12,12 +13,85 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
-from app.services import material_cache, task_artifacts
+from app.services import material_cache, task_artifacts, vision_filter
 from app.utils import utils
 
 # Thread-safe counter for API key rotation
 _api_key_counter = 0
 _api_key_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# 女性人物过滤 · 第一道防线（元数据关键词）
+#
+# 三家素材源的响应字段里只要出现这些词，就视为“素材大概率包含女性”并拒绝。
+# 词表刻意保持小而准，避免误杀正常素材；漏网的由第二道视觉防线兜底。
+# ---------------------------------------------------------------------------
+_FEMALE_METADATA_RE = re.compile(
+    r"\b(woman|women|girl|girls|female|lady|ladies)\b",
+    re.IGNORECASE,
+)
+
+
+def _metadata_contains_female_text(*texts: Any) -> bool:
+    """
+    判断任一文本片段中是否出现女性相关关键词（按完整单词匹配）。
+
+    下划线在正则里属于单词字符，“lady_films” 这类作者名无法命中 \\b 边界；
+    统一先替换为空格再匹配，连字符（URL slug）本身就是边界无需处理。
+    """
+    combined = " ".join(str(text).replace("_", " ") for text in texts if text)
+    return bool(_FEMALE_METADATA_RE.search(combined))
+
+
+def _iter_string_values(value: Any) -> Iterable[str]:
+    """递归展开响应对象中的全部字符串值，用于无固定字段的供应商兜底检查。"""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _iter_string_values(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _iter_string_values(child)
+
+
+def _hit_metadata_contains_female(hit: Any) -> bool:
+    """递归展开响应对象里的全部字符串值做关键词检查（含下划线归一化）。"""
+    for text in _iter_string_values(hit):
+        if _FEMALE_METADATA_RE.search(str(text).replace("_", " ")):
+            return True
+    return False
+
+
+# 搜索词本身也可能带性别词（LLM 生成的关键词偶发出现 “woman working” 之类）。
+# 这类词会让库存搜索结果被女性内容主导，也会让 WaveSpeed 直接把女性生成进
+# 画面。这里在进入任何素材源之前统一清洗：删除性别词并压缩多余空白。
+_FEMALE_TERM_RE = re.compile(
+    r"\b(woman|women|girl|girls|female|lady|ladies|feminine)\b[\s,\-]*",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_search_term(search_term: str) -> str:
+    cleaned = _FEMALE_TERM_RE.sub(" ", str(search_term))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,-")
+    return cleaned
+
+
+def sanitize_search_terms(search_terms: List[str]) -> List[str]:
+    """批量清洗搜索词：去除性别词、去空值并保持原有顺序去重。"""
+    cleaned_terms = []
+    seen = set()
+    for search_term in search_terms or []:
+        cleaned = _sanitize_search_term(search_term)
+        if not cleaned or cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        cleaned_terms.append(cleaned)
+    dropped = len(list(search_terms or [])) - len(cleaned_terms)
+    if dropped > 0:
+        logger.info(f"sanitized video search terms: removed_or_merged={dropped}")
+    return cleaned_terms
 
 
 def _safe_public_url(value: Any) -> str | None:
@@ -328,15 +402,13 @@ def search_videos_pexels(
             logger.error("pexels video search returned an unsupported response")
             return video_items
         videos = response["videos"]
-        blocked_terms = ("woman", "female", "girl", "lady", "women")
-        # Reject results using all available Pexels metadata before download.
+        # 第一道防线：拒绝任何元数据中出现女性关键词的结果（标题、URL slug、
+        # 描述、标签、作者名都参与匹配）。
         for v in videos:
-            metadata = " ".join(
-                str(v.get(field, "")) for field in ("url", "name", "description", "tags")
-            )
-            metadata += " " + str(v.get("user", ""))
-            if any(term in metadata.lower() for term in blocked_terms):
-                logger.info(f"rejecting Pexels result with blocked metadata: {v.get('id')}")
+            if _hit_metadata_contains_female(v):
+                logger.info(
+                    f"rejecting Pexels result with female-related metadata: {v.get('id')}"
+                )
                 continue
             duration = v["duration"]
             # check if video has desired minimum duration
@@ -363,6 +435,8 @@ def search_videos_pexels(
                             str(v.get("id")) if v.get("id") is not None else None
                         ),
                         "source_page": _safe_public_url(v.get("url")),
+                        # 官方截图（image 字段），供视觉安全过滤拼网格使用。
+                        "thumbnail_url": _safe_public_url(v.get("image")),
                         "creator": _creator_info(v.get("user")),
                         "rendition": {
                             "id": (
@@ -457,6 +531,13 @@ def search_videos_pixabay(
         videos = response["hits"]
         # loop through each video in the result
         for v in videos:
+            # 第一道防线：Pixabay 的 tags/user/pageURL 常带人物描述，出现女性
+            # 关键词时直接拒绝，不进入候选。
+            if _hit_metadata_contains_female(v):
+                logger.info(
+                    f"rejecting Pixabay result with female-related metadata: {v.get('id')}"
+                )
+                continue
             duration = v["duration"]
             # check if video has desired minimum duration
             if duration < minimum_duration:
@@ -487,6 +568,14 @@ def search_videos_pixabay(
                             str(v.get("id")) if v.get("id") is not None else None
                         ),
                         "source_page": _safe_public_url(v.get("pageURL")),
+                        # picture_id 可还原 Vimeo CDN 上的视频缩略图，供视觉
+                        # 安全过滤拼网格使用（Pixabay 官方文档给出的地址格式）。
+                        "thumbnail_url": _safe_public_url(
+                            f"https://i.vimeocdn.com/video/"
+                            f"{v.get('picture_id')}_295x166.jpg"
+                            if v.get("picture_id")
+                            else ""
+                        ),
                         "creator": _creator_info(
                             {
                                 "id": v.get("user_id"),
@@ -569,6 +658,13 @@ def search_videos_coverr(
             return video_items
 
         for v in response["hits"]:
+            # 第一道防线：Coverr 没有统一的描述字段，递归展开命中结果里的全部
+            # 字符串值（标题、slug、作者、标签等）做关键词检查。
+            if _hit_metadata_contains_female(v):
+                logger.info(
+                    f"rejecting Coverr result with female-related metadata: {v.get('id')}"
+                )
+                continue
             # duration 在不同响应里可能是 number(11.625) 或 string("10.500000")
             try:
                 duration = int(float(v.get("duration") or 0))
@@ -581,6 +677,17 @@ def search_videos_coverr(
             mp4_download_url = (v.get("urls") or {}).get("mp4_download")
             if not video_id or not mp4_download_url:
                 continue
+            # 缩略图字段在不同响应版本中名称不一，按常见命名尽力提取；取不到时
+            # 该素材只是跳过视觉筛查，仍受元数据关键词过滤保护。
+            urls_block = v.get("urls") if isinstance(v.get("urls"), dict) else {}
+            thumbnail_url = (
+                v.get("thumbnail")
+                or v.get("poster")
+                or v.get("preview_image")
+                or v.get("image")
+                or urls_block.get("thumbnail")
+                or urls_block.get("poster")
+            )
             if aspect != VideoAspect.square and not _matches_video_aspect(
                 v.get("max_width"),
                 v.get("max_height"),
@@ -598,6 +705,7 @@ def search_videos_coverr(
                 "search_term": search_term,
                 "asset_id": str(video_id),
                 "source_page": _safe_public_url(v.get("canonical_url") or v.get("url")),
+                "thumbnail_url": _safe_public_url(thumbnail_url),
                 "creator": _creator_info(v.get("creator") or v.get("author")),
                 "rendition": {
                     "id": "mp4_download",
@@ -1159,6 +1267,10 @@ def download_videos(
     max_clip_duration: int = 5,
     match_script_order: bool = False,
 ) -> List[str]:
+    # 第一道防线的前置步骤：搜索词先做性别词清洗，避免“woman xxx”这类关键词
+    # 把女性素材带进候选，也让 WaveSpeed 的生成提示词天然远离人物。
+    search_terms = sanitize_search_terms(search_terms)
+
     provider = "pexels"
     remote_search_videos = search_videos_pexels
     if source == "pixabay":
@@ -1222,6 +1334,10 @@ def download_videos(
             video_aspect=video_aspect,
         )
         logger.info(f"found {len(video_items)} videos for '{search_term}'")
+        # 第二道防线：同一关键词的全部候选合成一张网格图，一次视觉请求完成筛查。
+        video_items = vision_filter.filter_material_items(
+            video_items, context=search_term
+        )
 
         for item in video_items:
             if item.url not in valid_video_urls:
@@ -1251,14 +1367,6 @@ def download_videos(
                 video_url=item.url, save_dir=material_directory
             )
             if saved_video_path:
-                blocked_terms = ("woman", "female", "girl", "lady", "women")
-                if source == "pexels" and any(
-                    term in os.path.basename(saved_video_path).lower()
-                    for term in blocked_terms
-                ):
-                    logger.info(f"rejecting downloaded Pexels filename: {saved_video_path}")
-                    delete_files(saved_video_path)
-                    continue
                 logger.info(f"video saved: {saved_video_path}")
                 video_paths.append(saved_video_path)
                 try:
@@ -1289,6 +1397,84 @@ def download_videos(
     logger.success(f"downloaded {len(video_paths)} videos")
     _persist_material_sources(task_id, material_sources)
     return video_paths
+
+
+def _extract_first_frame_png(video_path: str) -> bytes | None:
+    """
+    提取已生成视频的首帧，编码为 PNG 字节。
+
+    WaveSpeed 是文生视频，没有现成缩略图可下载；视觉筛查改用首帧代替。
+    任何提取失败都返回 None，由调用方按“无法检查即放行”处理。
+    """
+    import io
+
+    from PIL import Image
+
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
+        if not clip.duration or clip.duration <= 0:
+            return None
+        frame = clip.get_frame(min(0.5, clip.duration / 2))
+        image = Image.fromarray(frame).convert("RGB")
+        image.thumbnail((480, 480))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception as exc:
+        logger.warning(
+            "failed to extract first frame for vision screening: "
+            f"video={Path(video_path).name}, error={type(exc).__name__}, detail={exc}"
+        )
+        return None
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+
+def _generated_clip_passes_vision_check(
+    saved_video_path: str, search_term: str
+) -> bool:
+    """
+    对 AI 生成的素材做视觉安全复检。
+
+    生成结果没有候选池可以挑选，只能在落盘后用首帧复核；检出女性人物时删除
+    文件并返回 False，让上层跳过该片段。检查链路任何异常都按放行处理，
+    与库存源的 fail-open 语义保持一致。
+    """
+    try:
+        frame_png = _extract_first_frame_png(saved_video_path)
+        if not frame_png:
+            logger.warning(
+                f"vision check skipped (no frame), keeping generated clip: "
+                f"term={search_term!r}"
+            )
+            return True
+        _, unsafe = vision_filter.screen_image_blobs(
+            {saved_video_path: frame_png}, context=search_term
+        )
+        if saved_video_path in unsafe:
+            logger.warning(
+                f"🚫 generated clip rejected by vision filter (woman detected): "
+                f"term={search_term!r}, file={Path(saved_video_path).name}"
+            )
+            try:
+                os.remove(saved_video_path)
+            except OSError as remove_error:
+                logger.warning(
+                    f"failed to remove rejected generated clip: {remove_error}"
+                )
+            return False
+        return True
+    except Exception as exc:
+        logger.warning(
+            "vision check failed unexpectedly, keeping generated clip: "
+            f"term={search_term!r}, error={type(exc).__name__}, detail={exc}"
+        )
+        return True
 
 
 def _download_videos_wavespeed_on_demand(
@@ -1333,6 +1519,8 @@ def _download_videos_wavespeed_on_demand(
                 item.url, material_directory
             )
             if not saved_video_path:
+                continue
+            if not _generated_clip_passes_vision_check(saved_video_path, search_term):
                 continue
             logger.info(f"video saved: {saved_video_path}")
             video_paths.append(saved_video_path)
@@ -1393,6 +1581,10 @@ def _download_videos_by_script_order(
             video_aspect=video_aspect,
         )
         logger.info(f"found {len(video_items)} videos for '{search_term}'")
+        # 第二道防线：与默认路径一致，按关键词整批视觉筛查后再进入候选分组。
+        video_items = vision_filter.filter_material_items(
+            video_items, context=search_term
+        )
 
         term_items = []
         for item in video_items:

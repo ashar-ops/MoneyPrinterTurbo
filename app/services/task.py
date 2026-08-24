@@ -31,6 +31,7 @@ from app.services import (
 from app.services import upload_post
 from app.services import state as sm
 from app.utils import file_security, utils
+from app.utils.logging_utils import log_stage
 
 
 # 发布请求最长可等待数分钟，不能继续占用视频生成任务的并发名额。
@@ -291,7 +292,7 @@ def _mark_task_failed(
 
 
 def generate_script(task_id, params):
-    logger.info("\n\n## generating video script")
+    log_stage("generating video script", icon="📝")
     video_script = params.video_script.strip()
     if not video_script:
         video_script = llm.generate_script_with_refinement(
@@ -312,7 +313,7 @@ def generate_script(task_id, params):
 
 
 def generate_terms(task_id, params, video_script):
-    logger.info("\n\n## generating video terms")
+    log_stage("generating video terms", icon="🔍")
     video_terms = params.video_terms
     if not video_terms:
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
@@ -498,7 +499,7 @@ def generate_audio(
         - audio_duration: duration of the audio in seconds
         - sub_maker: subtitle maker object if TTS is used, None otherwise
     """
-    logger.info("\n\n## generating audio")
+    log_stage("generating audio", icon="🎙️")
     # /audio 和 /subtitle 请求模型不包含 custom_audio_file，
     # 这里统一做兼容读取，避免直调接口时抛属性错误。
     requested_custom_audio_file = getattr(params, "custom_audio_file", None)
@@ -567,13 +568,13 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     Returns:
         - subtitle_path: path to the generated subtitle file
     """
-    logger.info("\n\n## generating subtitle")
+    log_stage("generating subtitle", icon="💬")
     if not params.subtitle_enabled:
         return ""
 
     subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
-    logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
+    logger.info(f"subtitle provider: {subtitle_provider}")
 
     if not subtitle_provider:
         logger.info("subtitle provider is empty, skip subtitle generation")
@@ -609,7 +610,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 
     if subtitle_provider == "whisper":
         subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
-        logger.info("\n\n## correcting subtitle")
+        log_stage("correcting subtitle", icon="🩹")
         subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)
@@ -628,7 +629,7 @@ def get_video_materials(
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
     if params.video_source == "local":
-        logger.info("\n\n## preprocess local materials")
+        log_stage("preprocess local materials", icon="📂")
         materials = video.preprocess_video(
             materials=params.video_materials, clip_duration=params.video_clip_duration
         )
@@ -652,9 +653,9 @@ def get_video_materials(
             return None
 
         request = loomloom_video_request
-        logger.info(
-            "\n\n## generating "
-            f"{len(request.batch.input_rows)} video materials with LoomLoom"
+        log_stage(
+            f"generating {len(request.batch.input_rows)} video materials with LoomLoom",
+            icon="🧵",
         )
         run_id = ""
         try:
@@ -702,7 +703,7 @@ def get_video_materials(
             )
             return None
     else:
-        logger.info(f"\n\n## downloading videos from {params.video_source}")
+        log_stage(f"downloading videos from {params.video_source}", icon="⬇️")
         # 顺序匹配模式只在用户显式开启时生效。这里强制素材下载按关键词顺序
         # 轮询，避免某个早期关键词下载太多素材，把后续脚本主题挤出最终时间线。
         downloaded_videos = material.download_videos(
@@ -799,7 +800,7 @@ def generate_final_videos(
         combined_video_path = path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
-        logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+        log_stage(f"combining video: {index} => {combined_video_path}", icon="🎞️")
         video.combine_videos(
             combined_video_path=combined_video_path,
             video_paths=downloaded_videos,
@@ -846,7 +847,7 @@ def generate_final_videos(
                 bgm_file_override = ""
                 warnings.append({"code": warning_code, "video_index": index})
 
-        logger.info(f"\n\n## generating video: {index} => {final_video_path}")
+        log_stage(f"generating video: {index} => {final_video_path}", icon="🎬")
         bgm_mix_succeeded = video.generate_video(
             video_path=combined_video_path,
             audio_path=audio_file,

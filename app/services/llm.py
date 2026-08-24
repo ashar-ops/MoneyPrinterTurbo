@@ -45,6 +45,20 @@ Generate a script for a video, depending on the subject of the video.
 8. respond in the same language as the video subject.
 """.strip()
 
+# 脚本质量评分使用的固定维度。评分提示词、结果解析和日志输出都依赖同一组键，
+# 避免新增维度时出现提示词与解析逻辑不同步的问题。
+SCRIPT_RATING_DIMENSIONS = (
+    "hook_strength",
+    "engagement",
+    "conversational_tone",
+    "viral_potential",
+)
+# 评分请求失败时的中性兜底结果：平均分 0 表示“不可信”，由质量门决定重试。
+UNRATED_SCRIPT_REVIEW = {
+    "average": 0.0,
+    "feedback": "Unable to analyze script.",
+}
+
 
 def _normalize_text_response(content, llm_provider: str) -> str:
     # 不同 LLM SDK 在异常或被拦截场景下，可能返回 None、空字符串，
@@ -552,6 +566,17 @@ def generate_script(
             "Use these examples as style references. Match their tone, structure, and pacing.\n\n"
             "SCRIPT EXAMPLES:\n" + examples + "\n\n" + prompt
         )
+        # 明确记录样例脚本已经注入提示词，便于确认“参考样例”链路确实生效；
+        # 样例数量按 === EXAMPLE n === 分隔符统计，兼容任意数量的自定义样例。
+        example_count = len(
+            re.findall(r"===\s*EXAMPLE\s+\d+\s*===", examples, re.IGNORECASE)
+        )
+        logger.info(
+            f"injected script style examples into prompt: "
+            f"count={example_count}, chars={len(examples)}"
+        )
+    else:
+        logger.debug("no script style examples configured, skipping few-shot injection")
     final_script = ""
     logger.info(
         "generating video script: "
@@ -608,61 +633,145 @@ def generate_script(
     return final_script.strip()
 
 
-def analyze_script(script: str, app_config=None) -> dict:
-    """Rate a script and return normalized scores, or a neutral failed rating."""
-    prompt = (
-        "Rate this YouTube Shorts script from 1-10 on: hook_strength, engagement, "
-        "conversational_tone, viral_potential. Return ONLY JSON: "
+def build_script_rating_prompt(script: str) -> str:
+    """构造脚本质量评分提示词，维度与 SCRIPT_RATING_DIMENSIONS 保持一致。"""
+    dimensions = ", ".join(SCRIPT_RATING_DIMENSIONS)
+    return (
+        "Rate this YouTube Shorts script from 1-10 on: "
+        f"{dimensions}. Return ONLY JSON: "
         "{'hook_strength': X, 'engagement': X, 'conversational_tone': X, "
         "'viral_potential': X, 'average': X, 'feedback': 'specific improvement suggestions'}\n\n"
         f"SCRIPT:\n{script}"
     )
+
+
+def _clamp_rating(value: float) -> float:
+    """把评分收敛到 0-10 区间，避免模型返回越界分数误导质量门判断。"""
+    return min(10.0, max(0.0, value))
+
+
+def analyze_script(script: str, app_config=None) -> dict:
+    """
+    给脚本打分（各维度 1-10 分），返回归一化后的评分结果。
+
+    解析失败或 LLM 请求失败时返回中性评分（average=0），让质量门把它当作
+    “不可信候选”处理；任何情况下都不抛异常，保证脚本生成主流程稳定。
+    """
+    prompt = build_script_rating_prompt(script)
     raw = ""
     try:
         raw = _generate_response(prompt, app_config=app_config) if app_config is not None else _generate_response(prompt)
+        if isinstance(raw, str) and raw.startswith("Error:"):
+            logger.error(f"script rating request failed: {raw}")
+            return dict(UNRATED_SCRIPT_REVIEW)
         parsed = json.loads(_strip_code_fence(raw))
     except (ValueError, TypeError, json.JSONDecodeError, SyntaxError):
+        # 部分模型会把 JSON 包在说明文字里。先尝试提取第一个 JSON object，
+        # 再退回 Python 字面量解析（单引号 JSON 常见）。
+        recovered = None
+        match = re.search(r"\{.*\}", raw or "", re.DOTALL)
+        if match:
+            try:
+                recovered = json.loads(match.group())
+            except (json.JSONDecodeError, ValueError):
+                recovered = None
+        if recovered is None:
+            try:
+                recovered = ast.literal_eval(_strip_code_fence(raw))
+            except Exception:
+                return dict(UNRATED_SCRIPT_REVIEW)
+        parsed = recovered
+    if not isinstance(parsed, dict):
+        return dict(UNRATED_SCRIPT_REVIEW)
+
+    review: dict = {}
+    dimension_scores = []
+    for key in SCRIPT_RATING_DIMENSIONS:
         try:
-            parsed = ast.literal_eval(_strip_code_fence(raw))
-        except Exception:
-            return {"average": 0.0, "feedback": "Unable to analyze script."}
+            score = _clamp_rating(float(parsed.get(key, 0)))
+        except (TypeError, ValueError):
+            return dict(UNRATED_SCRIPT_REVIEW)
+        review[key] = score
+        dimension_scores.append(score)
     try:
-        scores = [float(parsed.get(key, 0)) for key in (
-            "hook_strength", "engagement", "conversational_tone", "viral_potential"
-        )]
-        parsed["average"] = float(parsed.get("average", sum(scores) / 4))
-    except (AttributeError, TypeError, ValueError):
-        return {"average": 0.0, "feedback": "Unable to analyze script."}
-    parsed["feedback"] = str(parsed.get("feedback", ""))
-    return parsed
+        average = _clamp_rating(float(parsed.get("average", sum(dimension_scores) / 4)))
+    except (TypeError, ValueError):
+        average = sum(dimension_scores) / 4
+    review["average"] = average
+    review["feedback"] = str(parsed.get("feedback", ""))
+    return review
 
 
 def generate_script_with_refinement(
     video_subject, paragraph_number, custom_prompt, custom_system_prompt,
     language="", app_config=None,
 ) -> str:
-    """Generate up to the configured number of increasingly refined scripts."""
+    """
+    生成脚本并用“质量门”把关：每个候选先由 LLM 按 10 分制评分，
+    只有严格高于 ``script_refinement_min_rating`` 的候选才会被立即采纳；
+    否则带着评审反馈继续重试，直到用完尝试次数后返回得分最高的候选。
+    """
     runtime_config = app_config if app_config is not None else config.app
+    minimum = _clamp_rating(
+        float(runtime_config.get("script_refinement_min_rating", 8))
+    )
     if not runtime_config.get("script_refinement_enabled", True):
+        logger.info(
+            "script quality gate disabled, generating a single candidate without scoring"
+        )
         return generate_script(video_subject, language, paragraph_number, custom_prompt, custom_system_prompt, runtime_config)
-    minimum = float(runtime_config.get("script_refinement_min_rating", 8))
     attempts = max(1, int(runtime_config.get("script_refinement_max_attempts", 3)))
+    logger.info(
+        f"script quality gate armed: acceptance_threshold={minimum:.1f}/10, "
+        f"max_candidates={attempts}"
+    )
     best_script, best_rating, feedback = "", -1.0, ""
     for attempt in range(attempts):
+        candidate_number = attempt + 1
         prompt = custom_prompt or ""
         if feedback:
             prompt += f"\n\nPrevious attempt feedback: {feedback}. Improve based on this."
         candidate = generate_script(video_subject, language, paragraph_number, prompt, custom_system_prompt, runtime_config)
         if not candidate:
+            logger.warning(
+                f"candidate {candidate_number}/{attempts} came back empty, nothing to score"
+            )
             continue
         rating = analyze_script(candidate, runtime_config)
         score = float(rating.get("average", 0))
+        breakdown = ", ".join(
+            f"{key}={float(rating.get(key, 0)):.1f}" for key in SCRIPT_RATING_DIMENSIONS
+        )
+        accepted = score > minimum
         if score > best_rating:
             best_script, best_rating = candidate, score
-        if score >= minimum or attempt == attempts - 1:
+        if accepted:
+            logger.success(
+                f"candidate {candidate_number}/{attempts} scored {score:.1f}/10 "
+                f"[{breakdown}] → ACCEPTED (threshold {minimum:.1f})"
+            )
             break
+        remaining = attempts - candidate_number
+        follow_up = (
+            f"retrying with feedback ({remaining} attempt(s) left)"
+            if remaining
+            else "no attempts left"
+        )
+        logger.warning(
+            f"candidate {candidate_number}/{attempts} scored {score:.1f}/10 "
+            f"[{breakdown}] → REJECTED (needs > {minimum:.1f}), {follow_up}"
+        )
         feedback = rating.get("feedback", "")
+    if best_script:
+        logger.success(f"selected script with best score {best_rating:.1f}/10")
+    else:
+        logger.error("quality gate produced no usable script")
     return best_script
+
+
+def _is_provider_error(response: str) -> bool:
+    """_generate_response 把请求失败包装成 "Error: ..." 文本返回。"""
+    return isinstance(response, str) and response.startswith("Error:")
 
 
 def generate_title(script: str, topic: str, app_config=None) -> str:
@@ -670,6 +779,11 @@ def generate_title(script: str, topic: str, app_config=None) -> str:
               "or question. Create curiosity. Avoid clickbait that doesn't deliver. Return ONLY the title, no quotes.\n"
               f"Topic: {topic}\nScript: {script}")
     result = _generate_response(prompt, app_config=app_config) if app_config is not None else _generate_response(prompt)
+    if _is_provider_error(result):
+        # 失败时必须返回空标题，绝不能把 "Error: ..." 当成视频标题写入任务
+        # 记录甚至发布到社交平台。
+        logger.error(f"failed to generate title: {result}")
+        return ""
     return result.strip().strip('"\'')[:60]
 
 
@@ -678,6 +792,9 @@ def generate_hashtags(topic: str, script: str, app_config=None) -> list[str]:
               "with niche-specific tags. Return as comma-separated list without # symbols.\n"
               f"Topic: {topic}\nScript: {script}")
     result = _generate_response(prompt, app_config=app_config) if app_config is not None else _generate_response(prompt)
+    if _is_provider_error(result):
+        logger.error(f"failed to generate hashtags: {result}")
+        return []
     tags = []
     for tag in result.split(","):
         tag = re.sub(r"[^\w\- ]", "", tag, flags=re.UNICODE).strip().replace(" ", "")
@@ -715,7 +832,7 @@ def generate_terms(
             "the order of topics in the video script."
         )
         ordering_rule = (
-            "6. keep the terms in the same order as the script narration; "
+            "7. keep the terms in the same order as the script narration; "
             "earlier terms must describe earlier visual moments."
         )
         # 有序关键词模式下，示例数量要和 amount 保持一致，避免模型被固定
@@ -728,14 +845,22 @@ def generate_terms(
         output_example = json.dumps(example_terms[:amount], ensure_ascii=False)
     else:
         goal = (
-            f"Generate {amount} search terms for stock videos, depending on the "
-            "subject of a video."
+            f"Generate {amount} search terms for stock videos, depending on "
+            "the subject of a video."
         )
         ordering_rule = ""
         output_example = (
             '["search term 1", "search term 2", "search term 3",'
             '"search term 4", "search term 5"]'
         )
+
+    # 素材安全约束：性别词会把库存搜索结果和 AI 生成画面都带偏成人物特写。
+    # 在关键词生成源头就禁止这类词，比下载后再过滤更省配额也更可靠。
+    people_rule = (
+        "6. do not include gendered human words such as 'woman', 'women', 'girl', "
+        "'female' or 'lady' in any search term; describe objects, places, animals, "
+        "and actions instead of people."
+    )
 
     prompt = f"""
 # Role: Video Search Terms Generator
@@ -749,6 +874,7 @@ def generate_terms(
 3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
 4. the search terms must be related to the subject of the video.
 5. reply with english search terms only.
+{people_rule}
 {ordering_rule}
 
 ## Output Example:

@@ -2,27 +2,38 @@
 # The app copies this file to config.toml on first run. Keep API keys and other
 # credentials in config.toml; do not commit your local config.toml.
 
-[sheets]
-enabled = false
-tracking_id = ""
-service_account_file = "sheets-key.json"
-
-# =============================================================================
-# API Service / API 服务
-# =============================================================================
 # Log level: DEBUG, INFO, WARNING, or ERROR.
 log_level = "DEBUG"
 # Use 127.0.0.1 for local-only access. 0.0.0.0 listens on all network interfaces.
 listen_host = "0.0.0.0"
 listen_port = 8080
 
+[sheets]
+enabled = false
+tracking_id = ""
+service_account_file = "sheets-key.json"
+
 [app]
 # Optional few-shot examples used as script style references.
 script_examples_file = "resource/script_examples.txt"
 script_refinement_enabled = true
+# Script quality gate: each candidate is scored out of 10 by the LLM and only
+# accepted when strictly above this threshold; otherwise it regenerates with
+# feedback until max attempts, then keeps the best-scoring candidate.
 script_refinement_min_rating = 8
 script_refinement_max_attempts = 3
 thumbnail_enabled = true
+
+# Vision safety filter (second defense layer against unwanted people).
+# After metadata keyword filtering (first layer), all candidate thumbnails for
+# one search term are combined into a single numbered grid image and screened
+# with one vision request using the Gemini/Gemma model. Requires gemini_api_key.
+# Any vision failure keeps the assets (fail-open) so video generation never blocks.
+vision_safety_filter_enabled = true
+# Max assets combined into one grid image per request (1-12).
+vision_safety_max_per_grid = 12
+# Optional vision model override. Leave empty to reuse gemini_model_name.
+vision_safety_model = ""
 
 # Optional protection for API routes and generated files under /tasks.
 # Leave empty for local backward-compatible access. When configured, clients

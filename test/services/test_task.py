@@ -77,7 +77,7 @@ class TestTaskService(unittest.TestCase):
         )
 
         with patch.object(
-            tm.llm, "generate_script", return_value="生成的文案"
+            tm.llm, "generate_script_with_refinement", return_value="生成的文案"
         ) as generate:
             result = tm.generate_script("task-id", params)
 
@@ -86,7 +86,7 @@ class TestTaskService(unittest.TestCase):
             video_subject="咖啡",
             language="zh-CN",
             paragraph_number=2,
-            video_script_prompt="语气轻松",
+            custom_prompt="语气轻松",
             custom_system_prompt="Only write short narration.",
         )
 
@@ -330,13 +330,17 @@ class TestTaskService(unittest.TestCase):
         with (
             patch.object(tm.utils, "check_ffmpeg_ready", return_value=False) as check,
             patch.object(tm, "generate_script", return_value="脚本") as generate_script,
+            patch.object(tm.llm, "generate_title", return_value=""),
+            patch.object(tm.llm, "generate_hashtags", return_value=[]),
             patch.object(tm.sm, "state", state),
         ):
             result = tm.start("ffmpeg-missing-script-stage", params, stop_at="script")
 
         check.assert_not_called()
         generate_script.assert_called_once()
-        self.assertEqual(result, {"script": "脚本"})
+        self.assertEqual(
+            result, {"script": "脚本", "title": "", "hashtags": []}
+        )
 
     def test_run_pipeline_skips_ffmpeg_check_for_terms_stage(self):
         """搜索词阶段同样不需要 FFmpeg，不应触发探测。"""
@@ -345,6 +349,8 @@ class TestTaskService(unittest.TestCase):
         with (
             patch.object(tm.utils, "check_ffmpeg_ready", return_value=False) as check,
             patch.object(tm, "generate_script", return_value="脚本"),
+            patch.object(tm.llm, "generate_title", return_value=""),
+            patch.object(tm.llm, "generate_hashtags", return_value=[]),
             patch.object(tm, "generate_terms", return_value=["term"]),
             patch.object(tm, "save_script_data"),
             patch.object(tm.sm, "state", state),
@@ -352,7 +358,10 @@ class TestTaskService(unittest.TestCase):
             result = tm.start("ffmpeg-missing-terms-stage", params, stop_at="terms")
 
         check.assert_not_called()
-        self.assertEqual(result, {"script": "脚本", "terms": ["term"]})
+        self.assertEqual(
+            result,
+            {"script": "脚本", "terms": ["term"], "title": "", "hashtags": []},
+        )
 
     def test_run_pipeline_proceeds_past_ffmpeg_preflight_when_ready(self):
         """FFmpeg 可用时探测不应阻塞后续脚本生成。"""
@@ -361,6 +370,8 @@ class TestTaskService(unittest.TestCase):
         with (
             patch.object(tm.utils, "check_ffmpeg_ready", return_value=True) as check,
             patch.object(tm, "generate_script", return_value="脚本") as generate_script,
+            patch.object(tm.llm, "generate_title", return_value=""),
+            patch.object(tm.llm, "generate_hashtags", return_value=[]),
             patch.object(tm.sm, "state", state),
         ):
             result = tm.start("ffmpeg-ready", params, stop_at="script")
@@ -369,7 +380,9 @@ class TestTaskService(unittest.TestCase):
         # 与"仅在 script/terms 之外阶段才检查"的约定保持一致。
         check.assert_not_called()
         generate_script.assert_called_once()
-        self.assertEqual(result, {"script": "脚本"})
+        self.assertEqual(
+            result, {"script": "脚本", "title": "", "hashtags": []}
+        )
 
     def test_start_rejects_missing_sonilo_key_before_costly_pipeline_steps(self):
         """完整任务缺少 Sonilo Key 时不能先调用 LLM、TTS 或素材服务。"""
@@ -969,10 +982,16 @@ class TestTaskService(unittest.TestCase):
         流水线。每个提前停止点都要返回对应产物，同时不能误执行后续阶段。
         """
         expected_results = {
-            "script": {"script": "generated script"},
+            "script": {
+                "script": "generated script",
+                "title": "",
+                "hashtags": [],
+            },
             "terms": {
                 "script": "generated script",
                 "terms": ["coffee", "morning"],
+                "title": "",
+                "hashtags": [],
             },
             "audio": {"audio_file": "audio.mp3", "audio_duration": 5},
             "subtitle": {"subtitle_path": "subtitle.srt"},
@@ -991,6 +1010,8 @@ class TestTaskService(unittest.TestCase):
                         "generate_terms",
                         return_value=["coffee", "morning"],
                     ),
+                    patch.object(tm.llm, "generate_title", return_value=""),
+                    patch.object(tm.llm, "generate_hashtags", return_value=[]),
                     patch.object(tm, "save_script_data"),
                     patch.object(
                         tm,
