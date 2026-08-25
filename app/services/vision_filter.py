@@ -46,9 +46,9 @@ ASSET_2: SAFE | WOMAN_PRESENT
 
 Use one line per asset, numbered exactly as labelled in the grid."""
 
-# 兼容模型输出的宽松变体：“ASSET_3 - WOMAN_PRESENT”、“asset 3 : safe” 等。
+# 兼容模型输出的宽松变体：“**ASSET_3**: WOMAN_PRESENT”、“ASSET_3 - WOMAN PRESENT” 等。
 _VERDICT_RE = re.compile(
-    r"ASSET[_\-\s]*(\d+)\s*[:：\-]\s*(SAFE|WOMAN[\s_]?PRESENT)",
+    r"(?:\*\*|\b)ASSET[_\-\s]*(\d+)(?:\*\*|\b)?\s*[:：\-]\s*(?:\*\*)?\s*(SAFE|WOMAN[\s_]?PRESENT|FEMALE[\s_]?PRESENT|UNSAFE)",
     re.IGNORECASE,
 )
 

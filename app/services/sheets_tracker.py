@@ -73,7 +73,12 @@ def _next_empty_row(sheet) -> int:
     再用绝对坐标写入 A 列，保证每条记录都从第 1 列开始。
     """
     existing_rows = sheet.get_all_values()
-    return len(existing_rows) + 1
+    last_non_empty_idx = 0
+    for idx, row in enumerate(existing_rows, start=1):
+        if any(cell is not None and str(cell).strip() != "" for cell in row):
+            last_non_empty_idx = idx
+    return last_non_empty_idx + 1
+
 
 
 def _write_row(sheet, row_index: int, values: List[Any]) -> None:

@@ -27,7 +27,7 @@ _api_key_lock = threading.Lock()
 # 词表刻意保持小而准，避免误杀正常素材；漏网的由第二道视觉防线兜底。
 # ---------------------------------------------------------------------------
 _FEMALE_METADATA_RE = re.compile(
-    r"\b(woman|women|girl|girls|female|lady|ladies)\b",
+    r"\b(woman|women|girl|girls|female|females|lady|ladies|feminine|actress|actresses|daughter|daughters|mother|mothers|wife|wives|sister|sisters|bride|brides|queen|queens|princess|princesses|she|her|herself)\b",
     re.IGNORECASE,
 )
 
@@ -67,7 +67,7 @@ def _hit_metadata_contains_female(hit: Any) -> bool:
 # 这类词会让库存搜索结果被女性内容主导，也会让 WaveSpeed 直接把女性生成进
 # 画面。这里在进入任何素材源之前统一清洗：删除性别词并压缩多余空白。
 _FEMALE_TERM_RE = re.compile(
-    r"\b(woman|women|girl|girls|female|lady|ladies|feminine)\b[\s,\-]*",
+    r"\b(woman|women|girl|girls|female|females|lady|ladies|feminine|actress|actresses|daughter|daughters|mother|mothers|wife|wives|sister|sisters|bride|brides|queen|queens|princess|princesses)\b[\s,\-]*",
     re.IGNORECASE,
 )
 
@@ -117,6 +117,27 @@ def _safe_public_url(value: Any) -> str | None:
     ):
         return None
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _safe_image_url(value: Any) -> str | None:
+    """
+    保留用于下载缩略图的 HTTP(S) 地址，完整保留查询参数（以支持 CDN 尺寸与压缩参数）。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return value.strip()
+
 
 
 def _creator_info(value: Any) -> dict[str, str] | None:
@@ -424,6 +445,15 @@ def search_videos_pexels(
                     and w == video_width
                     and h == video_height
                 ):
+                    # 官方截图（image 字段）或首个预览帧（video_pictures[0]），供视觉安全过滤拼网格使用。
+                    raw_thumb = v.get("image")
+                    if not raw_thumb and isinstance(v.get("video_pictures"), list) and v["video_pictures"]:
+                        first_pic = v["video_pictures"][0]
+                        if isinstance(first_pic, dict):
+                            raw_thumb = first_pic.get("picture")
+                    if not raw_thumb and isinstance(v.get("src"), dict):
+                        raw_thumb = v["src"].get("small") or v["src"].get("tiny") or v["src"].get("medium")
+
                     item = MaterialInfo()
                     item.provider = "pexels"
                     item.url = video["link"]
@@ -435,8 +465,7 @@ def search_videos_pexels(
                             str(v.get("id")) if v.get("id") is not None else None
                         ),
                         "source_page": _safe_public_url(v.get("url")),
-                        # 官方截图（image 字段），供视觉安全过滤拼网格使用。
-                        "thumbnail_url": _safe_public_url(v.get("image")),
+                        "thumbnail_url": _safe_image_url(raw_thumb),
                         "creator": _creator_info(v.get("user")),
                         "rendition": {
                             "id": (
@@ -570,11 +599,11 @@ def search_videos_pixabay(
                         "source_page": _safe_public_url(v.get("pageURL")),
                         # picture_id 可还原 Vimeo CDN 上的视频缩略图，供视觉
                         # 安全过滤拼网格使用（Pixabay 官方文档给出的地址格式）。
-                        "thumbnail_url": _safe_public_url(
+                        "thumbnail_url": _safe_image_url(
                             f"https://i.vimeocdn.com/video/"
                             f"{v.get('picture_id')}_295x166.jpg"
                             if v.get("picture_id")
-                            else ""
+                            else (v.get("userImageURL") or "")
                         ),
                         "creator": _creator_info(
                             {
@@ -705,7 +734,7 @@ def search_videos_coverr(
                 "search_term": search_term,
                 "asset_id": str(video_id),
                 "source_page": _safe_public_url(v.get("canonical_url") or v.get("url")),
-                "thumbnail_url": _safe_public_url(thumbnail_url),
+                "thumbnail_url": _safe_image_url(thumbnail_url),
                 "creator": _creator_info(v.get("creator") or v.get("author")),
                 "rendition": {
                     "id": "mp4_download",

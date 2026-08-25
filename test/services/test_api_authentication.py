@@ -54,7 +54,7 @@ class TestAPIAuthenticationHTTP(unittest.TestCase):
         # 请求模型提供了默认值，空请求也可能真实调用大模型。这里隔离外部
         # 服务并核对调用次数，既验证鉴权顺序，也避免测试消耗用户的 API。
         with patch(
-            "app.controllers.v1.llm.llm.generate_script",
+            "app.controllers.v1.llm.llm.generate_script_with_refinement",
             return_value="mocked script",
         ) as generate_script:
             missing = self.client.post("/api/v1/scripts", json={})

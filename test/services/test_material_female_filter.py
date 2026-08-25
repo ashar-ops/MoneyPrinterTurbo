@@ -109,7 +109,7 @@ class TestPexelsMetadataFilter(FemaleFilterTestBase):
 
         self.assertEqual(
             results[0].source_info["thumbnail_url"],
-            "https://images.pexels.com/videos/4/preview.jpg",
+            "https://images.pexels.com/videos/4/preview.jpg?auto=compress&h=630",
         )
 
 

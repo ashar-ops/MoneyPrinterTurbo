@@ -3124,11 +3124,11 @@ def _render_local_script_generation(params):
     with st.spinner(tr("Generating Video Script and Keywords")):
 
         def generate_script_and_terms(app_config_snapshot):
-            script = llm.generate_script(
+            script = llm.generate_script_with_refinement(
                 video_subject=params.video_subject,
                 language=params.video_language,
                 paragraph_number=params.paragraph_number,
-                video_script_prompt=params.video_script_prompt,
+                custom_prompt=params.video_script_prompt,
                 custom_system_prompt=params.custom_system_prompt,
                 app_config=app_config_snapshot,
             )

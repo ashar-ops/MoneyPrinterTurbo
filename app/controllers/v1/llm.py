@@ -24,11 +24,11 @@ router = new_router(dependencies=[Depends(base.verify_token)])
     summary="Create a script for the video",
 )
 def generate_video_script(request: Request, body: VideoScriptRequest):
-    video_script = llm.generate_script(
+    video_script = llm.generate_script_with_refinement(
         video_subject=body.video_subject,
         language=body.video_language,
         paragraph_number=body.paragraph_number,
-        video_script_prompt=body.video_script_prompt,
+        custom_prompt=body.video_script_prompt,
         custom_system_prompt=body.custom_system_prompt,
     )
     response = {"video_script": video_script}

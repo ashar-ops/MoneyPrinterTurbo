@@ -22,7 +22,7 @@ class TestLlmController(unittest.TestCase):
 
         with patch.object(
             llm_controller.llm,
-            "generate_script",
+            "generate_script_with_refinement",
             return_value="Generated script",
         ) as generate:
             response = llm_controller.generate_video_script(None, body)
@@ -35,7 +35,7 @@ class TestLlmController(unittest.TestCase):
             video_subject="Coffee",
             language="en",
             paragraph_number=2,
-            video_script_prompt="Friendly tone",
+            custom_prompt="Friendly tone",
             custom_system_prompt="Return narration only.",
         )
 

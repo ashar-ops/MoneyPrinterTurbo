@@ -703,14 +703,22 @@ def analyze_script(script: str, app_config=None) -> dict:
 
 
 def generate_script_with_refinement(
-    video_subject, paragraph_number, custom_prompt, custom_system_prompt,
-    language="", app_config=None,
+    video_subject: str,
+    paragraph_number: int = 1,
+    custom_prompt: str = "",
+    custom_system_prompt: str = "",
+    language: str = "",
+    app_config=None,
+    video_script_prompt: str = "",
+    video_language: str = "",
 ) -> str:
     """
     生成脚本并用“质量门”把关：每个候选先由 LLM 按 10 分制评分，
     只有严格高于 ``script_refinement_min_rating`` 的候选才会被立即采纳；
     否则带着评审反馈继续重试，直到用完尝试次数后返回得分最高的候选。
     """
+    custom_prompt = custom_prompt or video_script_prompt or ""
+    language = language or video_language or ""
     runtime_config = app_config if app_config is not None else config.app
     minimum = _clamp_rating(
         float(runtime_config.get("script_refinement_min_rating", 8))
@@ -719,7 +727,14 @@ def generate_script_with_refinement(
         logger.info(
             "script quality gate disabled, generating a single candidate without scoring"
         )
-        return generate_script(video_subject, language, paragraph_number, custom_prompt, custom_system_prompt, runtime_config)
+        return generate_script(
+            video_subject,
+            language,
+            paragraph_number,
+            custom_prompt,
+            custom_system_prompt,
+            runtime_config,
+        )
     attempts = max(1, int(runtime_config.get("script_refinement_max_attempts", 3)))
     logger.info(
         f"script quality gate armed: acceptance_threshold={minimum:.1f}/10, "

@@ -69,7 +69,10 @@ def test_loomloom_path_does_not_fall_back_to_local_llm_calls():
         }
 
     assert llm_calls(loomloom_function) == set()
-    assert {"generate_script", "generate_terms"} <= llm_calls(local_function)
+    assert (
+        {"generate_script", "generate_terms"} <= llm_calls(local_function)
+        or {"generate_script_with_refinement", "generate_terms"} <= llm_calls(local_function)
+    )
 
 
 def test_loomloom_quote_signature_changes_with_billable_inputs():

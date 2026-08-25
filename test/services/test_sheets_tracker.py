@@ -77,6 +77,24 @@ class TestSheetsTrackerPlacement(SheetsTrackerTestBase):
         # 失败记录的空列保持为空字符串，不产生 None 单元格。
         self.assertEqual(worksheet.updates[0]["values"][2], "")
 
+    def test_entry_written_after_trailing_blank_rows(self):
+        """测试在有尾部空行（如全空字符串行）时，新条目精准写在最后一个有效行之后。"""
+        worksheet = _FakeWorksheet(
+            rows=[
+                ["2026-08-20T00:00:00+00:00", "topic-1", "script", 61, "link", "Success"],
+                ["", "", "", "", "", ""],
+                ["", "", "", "", "", ""],
+            ]
+        )
+
+        with patch.object(sheets_tracker, "_sheet", return_value=worksheet):
+            sheets_tracker.track_video_success("topic-2", "script-2", 45, "link-2")
+
+        self.assertEqual(len(worksheet.updates), 1)
+        update = worksheet.updates[0]
+        self.assertEqual(update["row"], 2)
+        self.assertEqual(update["values"][1], "topic-2")
+
     def test_long_script_is_truncated_to_safe_cell_length(self):
         worksheet = _FakeWorksheet()
         huge_script = "x" * (sheets_tracker._MAX_CELL_LENGTH + 5000)
