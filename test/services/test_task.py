@@ -527,6 +527,11 @@ class TestTaskService(unittest.TestCase):
                 "LoomLoomVideoBackend",
                 return_value=backend,
             ),
+            patch.object(
+                tm.vision_filter,
+                "screen_video_paths",
+                side_effect=lambda paths, *a, **k: paths,
+            ),
             patch.object(tm.time, "sleep") as sleep,
         ):
             result = tm.get_video_materials(

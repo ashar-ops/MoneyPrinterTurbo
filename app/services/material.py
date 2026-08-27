@@ -119,6 +119,15 @@ def _safe_public_url(value: Any) -> str | None:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def _announce_vision_gate(scope: str) -> None:
+    """在日志里明确标出“AI 视觉安全闸门”这一独立阶段，方便在屏幕上追踪。"""
+    logger.info(
+        "🔍 ── AI VISION SAFETY GATE ── "
+        f"scanning '{scope}' clips frame-by-frame for women "
+        "(strict: any woman / unclear / error ⇒ clip dropped)"
+    )
+
+
 def _safe_image_url(value: Any) -> str | None:
     """
     保留用于下载缩略图的 HTTP(S) 地址，完整保留查询参数（以支持 CDN 尺寸与压缩参数）。
@@ -1235,6 +1244,14 @@ def _search_videos_with_cache(
             cached_items,
             video_aspect,
         )
+        # 旧版本缓存可能写入过带女性关键词的命中结果；读取缓存时统一再跑一遍
+        # 第一道元数据防线，避免历史脏数据绕过关键词过滤。视觉层会在下游对每个
+        # 候选做帧级筛查，这里只是提前收敛候选集。
+        filtered_cached_items = [
+            item
+            for item in filtered_cached_items
+            if not _hit_metadata_contains_female(item.source_info)
+        ]
         ignored_count = len(cached_items) - len(filtered_cached_items)
         if ignored_count:
             # 旧版本缓存可能混入其它方向的素材。即使仍有少量可用条目，也要刷新
@@ -1299,6 +1316,15 @@ def download_videos(
     # 第一道防线的前置步骤：搜索词先做性别词清洗，避免“woman xxx”这类关键词
     # 把女性素材带进候选，也让 WaveSpeed 的生成提示词天然远离人物。
     search_terms = sanitize_search_terms(search_terms)
+
+    # 没有 AI 视觉检查就绝不把任何片段加进成片：视觉过滤不可用时直接空手返回，
+    # 由上层因“无可用素材”失败，而不是退回无防护的下载流程。
+    if not vision_filter.is_enabled():
+        logger.critical(
+            "VISION SAFETY REQUIRED but disabled (gemini_api_key missing); "
+            "refusing to download any unverified material."
+        )
+        return []
 
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1380,6 +1406,8 @@ def download_videos(
     video_paths = []
     material_sources: list[dict[str, Any]] = []
 
+    _announce_vision_gate("stock")
+
     concat_mode_value = getattr(video_concat_mode, "value", video_concat_mode)
     if concat_mode_value == VideoConcatMode.random.value:
         random.shuffle(valid_video_items)
@@ -1397,6 +1425,15 @@ def download_videos(
             )
             if saved_video_path:
                 logger.info(f"video saved: {saved_video_path}")
+                # 权威闸门：对每个真实片段抽帧做视觉筛查，女性/不确定/抽帧失败
+                # 一律删除并跳过，绝不进入成片。
+                if not vision_filter.screen_video_file(
+                    saved_video_path, search_term, delete_unsafe=True
+                ):
+                    logger.info(
+                        f"clip rejected by vision safety, skipped: {saved_video_path}"
+                    )
+                    continue
                 video_paths.append(saved_video_path)
                 try:
                     material_sources.append(
@@ -1428,84 +1465,6 @@ def download_videos(
     return video_paths
 
 
-def _extract_first_frame_png(video_path: str) -> bytes | None:
-    """
-    提取已生成视频的首帧，编码为 PNG 字节。
-
-    WaveSpeed 是文生视频，没有现成缩略图可下载；视觉筛查改用首帧代替。
-    任何提取失败都返回 None，由调用方按“无法检查即放行”处理。
-    """
-    import io
-
-    from PIL import Image
-
-    clip = None
-    try:
-        clip = VideoFileClip(video_path)
-        if not clip.duration or clip.duration <= 0:
-            return None
-        frame = clip.get_frame(min(0.5, clip.duration / 2))
-        image = Image.fromarray(frame).convert("RGB")
-        image.thumbnail((480, 480))
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
-    except Exception as exc:
-        logger.warning(
-            "failed to extract first frame for vision screening: "
-            f"video={Path(video_path).name}, error={type(exc).__name__}, detail={exc}"
-        )
-        return None
-    finally:
-        if clip is not None:
-            try:
-                clip.close()
-            except Exception:
-                pass
-
-
-def _generated_clip_passes_vision_check(
-    saved_video_path: str, search_term: str
-) -> bool:
-    """
-    对 AI 生成的素材做视觉安全复检。
-
-    生成结果没有候选池可以挑选，只能在落盘后用首帧复核；检出女性人物时删除
-    文件并返回 False，让上层跳过该片段。检查链路任何异常都按放行处理，
-    与库存源的 fail-open 语义保持一致。
-    """
-    try:
-        frame_png = _extract_first_frame_png(saved_video_path)
-        if not frame_png:
-            logger.warning(
-                f"vision check skipped (no frame), keeping generated clip: "
-                f"term={search_term!r}"
-            )
-            return True
-        _, unsafe = vision_filter.screen_image_blobs(
-            {saved_video_path: frame_png}, context=search_term
-        )
-        if saved_video_path in unsafe:
-            logger.warning(
-                f"🚫 generated clip rejected by vision filter (woman detected): "
-                f"term={search_term!r}, file={Path(saved_video_path).name}"
-            )
-            try:
-                os.remove(saved_video_path)
-            except OSError as remove_error:
-                logger.warning(
-                    f"failed to remove rejected generated clip: {remove_error}"
-                )
-            return False
-        return True
-    except Exception as exc:
-        logger.warning(
-            "vision check failed unexpectedly, keeping generated clip: "
-            f"term={search_term!r}, error={type(exc).__name__}, detail={exc}"
-        )
-        return True
-
-
 def _download_videos_wavespeed_on_demand(
     *,
     task_id: str,
@@ -1526,6 +1485,7 @@ def _download_videos_wavespeed_on_demand(
     video_paths: List[str] = []
     material_sources: list[dict[str, Any]] = []
     total_duration = 0.0
+    _announce_vision_gate("wavespeed")
     for search_term in search_terms:
         try:
             video_items = generate_videos_wavespeed(
@@ -1549,7 +1509,12 @@ def _download_videos_wavespeed_on_demand(
             )
             if not saved_video_path:
                 continue
-            if not _generated_clip_passes_vision_check(saved_video_path, search_term):
+            if not vision_filter.screen_video_file(
+                saved_video_path, search_term, delete_unsafe=True
+            ):
+                logger.info(
+                    f"generated clip rejected by vision safety, skipped: {saved_video_path}"
+                )
                 continue
             logger.info(f"video saved: {saved_video_path}")
             video_paths.append(saved_video_path)
@@ -1633,6 +1598,7 @@ def _download_videos_by_script_order(
 
     video_paths = []
     material_sources: list[dict[str, Any]] = []
+    _announce_vision_gate("stock (script-ordered)")
     total_duration = 0.0
     candidate_index = 0
     while candidate_groups and total_duration <= audio_duration:
@@ -1656,6 +1622,13 @@ def _download_videos_by_script_order(
                 )
                 if saved_video_path:
                     logger.info(f"video saved: {saved_video_path}")
+                    if not vision_filter.screen_video_file(
+                        saved_video_path, search_term, delete_unsafe=True
+                    ):
+                        logger.info(
+                            f"ordered clip rejected by vision safety, skipped: {saved_video_path}"
+                        )
+                        continue
                     video_paths.append(saved_video_path)
                     try:
                         material_sources.append(

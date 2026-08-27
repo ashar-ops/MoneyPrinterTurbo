@@ -13,6 +13,7 @@
 import hashlib
 import io
 import math
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,16 +36,17 @@ _CELL_SIZE = 240
 _LABEL_BAR_HEIGHT = 28
 
 # 用户指定的审查提示词。输出格式固定为逐行 “ASSET_n: SAFE | WOMAN_PRESENT”。
-SAFETY_PROMPT = """You are a content safety filter. Examine this grid of stock media thumbnails.
-For each numbered asset, determine if it contains ANY visible woman, girl, or female-presenting person.
-Even a partial face, silhouette, or body counts as a "woman present".
-Respond ONLY in this exact format — no other text:
+# 严格二分类：不能看清或不确定时一律判为 WOMAN_PRESENT，绝不允许“猜测安全”。
+SAFETY_PROMPT = """You are a strict content-safety classifier. The grid shows frames sampled from stock videos.
+For EACH numbered asset, decide ONLY whether it shows any woman, girl, or female-presenting person.
+Any form counts — a face, a silhouette, a body, partial or full, in any context.
+There are exactly two allowed answers per asset, and nothing else:
 
-ASSET_1: SAFE | WOMAN_PRESENT
-ASSET_2: SAFE | WOMAN_PRESENT
-...
+ASSET_n: SAFE            # absolutely no woman/girl/female person visible
+ASSET_n: WOMAN_PRESENT   # any woman at all, even partial, ambiguous, or uncertain
 
-Use one line per asset, numbered exactly as labelled in the grid."""
+If you cannot clearly see the asset or are unsure for ANY reason, you MUST answer WOMAN_PRESENT.
+Never guess SAFE. Output ONLY the lines above, one per asset, numbered exactly as labelled."""
 
 # 兼容模型输出的宽松变体：“**ASSET_3**: WOMAN_PRESENT”、“ASSET_3 - WOMAN PRESENT” 等。
 _VERDICT_RE = re.compile(
@@ -111,6 +113,37 @@ def _cached_verdicts(keys: Iterable[str]) -> tuple[set[str], set[str]]:
 def _store_verdicts(verdict_by_key: dict[str, bool]) -> None:
     with _verdict_cache_lock:
         _verdict_cache.update(verdict_by_key)
+
+
+# 已下载视频文件（按内容哈希）的判定缓存，避免同一份缓存文件在一次运行内
+# 被反复抽帧筛查。键是文件内容的 md5，值是是否安全（True=可用）。
+_file_verdict_cache: dict[str, bool] = {}
+
+
+def _file_md5(path: str) -> str:
+    h = hashlib.md5()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _store_file_verdict(file_digest: str, safe: bool) -> None:
+    if not file_digest:
+        return
+    with _verdict_cache_lock:
+        _file_verdict_cache[file_digest] = safe
+
+
+def _try_remove(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:
+        logger.warning(f"failed to remove rejected clip: {path}, error={exc}")
 
 
 def _download_blob(url: str) -> bytes | None:
@@ -355,33 +388,235 @@ def screen_image_blobs(
                 for position, (_, blob) in enumerate(chunk, start=1)
             ]
             grid_png = build_composite_grid(labeled)
+            logger.info(
+                f"👁️ vision pre-filter: scanning {len(chunk)} thumbnail(s) "
+                f"for women · term={context!r}"
+            )
             raw_response = _call_vision_model(grid_png, runtime_config)
+            logger.debug(
+                f"vision model raw response (thumbnails, term={context!r}): {raw_response}"
+            )
             verdicts = parse_safety_verdicts(raw_response, len(chunk))
             for position, (key, blob) in enumerate(chunk, start=1):
                 verdict = verdicts.get(position)
                 if verdict is None:
                     # 模型漏答的条目按放行处理，同时记录便于排查提示词效果。
                     logger.warning(
-                        f"vision filter returned no verdict, asset kept: "
-                        f"term={context!r}, key={key}"
+                        f"   🟡 ASSET_{position} → UNCLEAR (kept for frame recheck) · {key}"
                     )
                     _store_verdicts({_verdict_cache_key(blob): True})
                     all_safe.add(key)
                 elif verdict:
+                    logger.info(f"   ✅ ASSET_{position} → SAFE · {key}")
                     _store_verdicts({_verdict_cache_key(blob): True})
                     all_safe.add(key)
                 else:
+                    logger.warning(
+                        f"   🚫 ASSET_{position} → WOMAN_PRESENT (rejected) · {key}"
+                    )
                     _store_verdicts({_verdict_cache_key(blob): False})
                     all_unsafe.add(key)
         except Exception as exc:
             # fail-open：这一批全部放行，仅记录告警。第一道元数据防线仍在。
             logger.warning(
                 "vision safety screening failed, keeping assets: "
-                f"term={context!r}, error={type(exc).__name__}, detail={exc}"
+                "term={!r}, error={}: {}",
+                context,
+                type(exc).__name__,
+                exc,
+                exc_info=False,
             )
             all_safe.update(key for key, _ in chunk)
 
     return all_safe, all_unsafe
+
+
+# ---------------------------------------------------------------------------
+# 第三道防线（权威闸门）· 对真实视频抽帧做视觉筛查
+#
+# 缩略图只是静态海报，很多女性人物出现在动态画面里，单看海报会被漏掉；而且
+# 旧缓存文件、local_videos 目录里的素材根本没有缩略图可下载。所以真正的“是否
+# 进成片”判定必须落在“真实视频帧”上。每个候选片段只抽 **一帧** 即可：素材片段
+# 都很短、只有一个场景，任何一帧都足以判断是否出现女性，没必要把整段视频逐帧
+# 发给模型。策略是 fail-closed（严格）：模型判为女性、答非所问、抽帧失败或接口
+# 报错，就判定该片段不可用并删除，绝不让未经验证的内容进入成片。
+# ---------------------------------------------------------------------------
+def _extract_single_frame_png(video_path: str, max_dim: int = 480) -> bytes | None:
+    """
+    从视频里抽取一帧（取中段，避开片头黑场）编码为 PNG 字节。
+
+    素材片段通常只有一个场景，单帧足以判断是否含女性人物。返回 ``None`` 表示
+    抽帧失败，由调用方按“无法验证即不可用”处理。
+    """
+    from PIL import Image
+
+    from moviepy.video.io.VideoFileClip import VideoFileClip
+
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
+        if not clip.duration or clip.duration <= 0:
+            return None
+        # 取中段帧：避开片头/片尾可能的黑场或淡入淡出。
+        timestamp = min(clip.duration / 2, max(0.0, clip.duration - 0.01))
+        frame = clip.get_frame(timestamp)
+        image = Image.fromarray(frame).convert("RGB")
+        image.thumbnail((max_dim, max_dim))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception as exc:
+        logger.warning(
+            "failed to extract a frame for vision screening: "
+            f"video={os.path.basename(video_path)}, error={type(exc).__name__}, detail={exc}"
+        )
+        return None
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+
+def parse_safe_indices(response_text: str, expected_count: int) -> set[int]:
+    """
+    解析严格二分类响应，只返回“明确判定为 SAFE”的资产序号集合。
+
+    没有出现的序号、判为 WOMAN_PRESENT 的、或任何无法解析的内容都不在集合内，
+    由调用方统一视作“不可用”。
+    """
+    safe: set[int] = set()
+    for match in _VERDICT_RE.finditer(response_text or ""):
+        try:
+            index = int(match.group(1))
+        except ValueError:
+            continue
+        token = re.sub(r"[^A-Z]", "", match.group(2).upper())
+        if 1 <= index <= expected_count and token == "SAFE":
+            safe.add(index)
+    return safe
+
+
+def screen_video_file(
+    video_path: str,
+    context: str = "",
+    *,
+    app_config=None,
+    delete_unsafe: bool = False,
+) -> bool:
+    """
+    对单个已下载视频做严格视觉安全筛查，返回是否可安全使用。
+
+    这是“是否进入成片”的权威闸门：必须启用视觉过滤且模型明确判为 SAFE 才返回
+    True；模型未启用、文件缺失、抽帧失败、响应无法解析或接口报错都返回 False
+    （fail-closed）。``delete_unsafe=True`` 时，不可用片段会被直接删除（用于清理
+    我们自己的下载缓存；本地用户素材默认只剔除不删除）。
+    """
+    runtime_config = app_config if app_config is not None else config.app
+    if not is_enabled(runtime_config):
+        # 用户要求“没有 AI 检查就绝不把片段加进成片”，因此视觉过滤不可用时必须
+        # 拒绝一切片段，而不是退回到无防护状态。
+        logger.critical(
+            "vision safety is REQUIRED but disabled (missing gemini_api_key); "
+            f"refusing to use unverified clip: {video_path}"
+        )
+        if delete_unsafe:
+            _try_remove(video_path)
+        return False
+
+    if not video_path or not os.path.exists(video_path):
+        return False
+
+    file_digest = _file_md5(video_path)
+    with _verdict_cache_lock:
+        cached = _file_verdict_cache.get(file_digest)
+    if cached is not None:
+        return cached
+
+    frame = _extract_single_frame_png(video_path)
+    if not frame:
+        logger.warning(
+            f"🚫 vision rejected clip (no frame extracted): context={context!r}, "
+            f"file={os.path.basename(video_path)}"
+        )
+        if delete_unsafe:
+            _try_remove(video_path)
+        _store_file_verdict(file_digest, False)
+        return False
+
+    labeled = [("ASSET_1", frame)]
+    file_name = os.path.basename(video_path)
+    logger.info(
+        f"🔍 vision gate: scanning 1 frame of clip for women · "
+        f"context={context!r} · file={file_name}"
+    )
+    try:
+        grid_png = build_composite_grid(labeled)
+        raw_response = _call_vision_model(grid_png, runtime_config)
+        logger.debug(
+            f"vision model raw response (frames, context={context!r}): {raw_response}"
+        )
+        safe_indices = parse_safe_indices(raw_response, 1)
+        if 1 in safe_indices:
+            logger.info("   ✅ ASSET_1 → SAFE")
+        else:
+            logger.warning("   🚫 ASSET_1 → WOMAN_PRESENT / UNCLEAR")
+        if 1 not in safe_indices:
+            logger.warning(
+                "🚫 clip REJECTED (woman present or unclear): "
+                "context={!r}, file={}".format(context, file_name)
+            )
+            if delete_unsafe:
+                _try_remove(video_path)
+            _store_file_verdict(file_digest, False)
+            return False
+        logger.success(
+            "✅ clip PASSED vision safety: context={!r}, file={}".format(context, file_name)
+        )
+        _store_file_verdict(file_digest, True)
+        return True
+    except Exception as exc:
+        # 接口故障也按“不可用”处理，宁可少一段素材也不能把未验证内容放进成片。
+        # 异常对象可能带有花括号（如 API 错误 JSON），必须用参数传入以避免
+        # loguru 把消息里的花括号误当格式字段而崩溃。
+        logger.critical(
+            "vision screening errored, rejecting clip (fail-closed): "
+            "context={!r}, file={}, error={}: {}",
+            context,
+            file_name,
+            type(exc).__name__,
+            exc,
+            exc_info=False,
+        )
+        if delete_unsafe:
+            _try_remove(video_path)
+        _store_file_verdict(file_digest, False)
+        return False
+
+
+def screen_video_paths(
+    paths: list[str],
+    context: str = "",
+    *,
+    delete_unsafe: bool = False,
+) -> list[str]:
+    """对一批视频路径逐个严格筛查，返回通过（可安全使用）的路径列表。"""
+    logger.info(
+        f"🔍 AI VISION SAFETY GATE · batch screening {len(paths)} clip(s) "
+        f"frame-by-frame for women · context={context!r}"
+    )
+    safe_paths: list[str] = []
+    for path in paths:
+        if screen_video_file(path, context, delete_unsafe=delete_unsafe):
+            safe_paths.append(path)
+        else:
+            logger.info(f"clip excluded by vision safety: {path}")
+    logger.success(
+        f"✅ vision batch done: context={context!r}, "
+        f"passed={len(safe_paths)}/{len(paths)}"
+    )
+    return safe_paths
 
 
 def _material_thumbnail_url(item) -> str:
@@ -409,11 +644,13 @@ def filter_material_items(
 
     runtime_config = app_config if app_config is not None else config.app
     if not is_enabled(runtime_config):
-        logger.debug(
-            f"vision safety filter disabled, keeping all candidates: "
-            f"term={context!r}, count={len(items)}"
+        # 没有 AI 检查就绝不把片段加进成片：视觉过滤不可用时直接清空候选，
+        # 由上层因“无可用素材”而失败，而不是退回无防护状态。
+        logger.critical(
+            "vision safety filter is REQUIRED but disabled (missing gemini_api_key); "
+            f"refusing all {len(items)} candidates for {context!r}"
         )
-        return list(items)
+        return []
 
     thumbnail_entries = []
     for item in items:
@@ -457,3 +694,96 @@ def filter_material_items(
         f"checked={len(blobs_by_key)}, rejected={len(unsafe_urls)}, kept={len(kept)}"
     )
     return kept
+
+
+# ---------------------------------------------------------------------------
+# 运维工具：清理已落盘的“脏”缓存、以及对视觉模型做连通性自检
+# ---------------------------------------------------------------------------
+_VIDEO_SUFFIXES = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
+
+
+def sweep_directory(directory: str, context: str = "sweep") -> tuple[int, int]:
+    """
+    扫描目录里的视频文件并严格筛查，删除被判为女性的片段。
+
+    用于清理历史遗留的 ``cache_videos`` / ``local_videos`` 目录——这些文件可能在
+    加入防护前就已经存在，且会被反复复用。返回 ``(扫描数, 删除数)``。
+    """
+    if not directory or not os.path.isdir(directory):
+        logger.warning(f"sweep skipped, directory not found: {directory}")
+        return 0, 0
+    checked = 0
+    removed = 0
+    for name in sorted(os.listdir(directory)):
+        if not name.lower().endswith(_VIDEO_SUFFIXES):
+            continue
+        path = os.path.join(directory, name)
+        checked += 1
+        if not screen_video_file(path, context, delete_unsafe=True):
+            removed += 1
+    logger.info(
+        f"vision sweep finished: directory={directory}, "
+        f"checked={checked}, removed={removed}"
+    )
+    return checked, removed
+
+
+def self_check() -> bool:
+    """用一张纯色图自检视觉模型是否可用且返回预期格式。"""
+    from PIL import Image
+
+    runtime_config = config.app
+    if not is_enabled(runtime_config):
+        logger.error("self-check FAILED: vision safety is disabled (missing gemini_api_key)")
+        return False
+    image = Image.new("RGB", (240, 240), (200, 30, 30))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    blob = buffer.getvalue()
+    labeled = [("ASSET_1", blob)]
+    try:
+        grid_png = build_composite_grid(labeled)
+        raw = _call_vision_model(grid_png, runtime_config)
+        safe = parse_safe_indices(raw, 1)
+        logger.info(f"self-check model response: {raw!r}")
+        if 1 in safe:
+            logger.success("self-check OK: vision model reachable and returned SAFE")
+            return True
+        logger.error("self-check FAILED: model did not return expected SAFE verdict")
+        return False
+    except Exception as exc:
+        logger.error(
+            "self-check FAILED: vision model error: {}: {}",
+            type(exc).__name__,
+            exc,
+            exc_info=False,
+        )
+        return False
+
+
+def _main(argv: list[str]) -> int:
+
+    from app.utils import utils
+
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "check":
+        return 0 if self_check() else 1
+    if cmd == "sweep":
+        target = argv[2] if len(argv) > 2 else "cache"
+        if target in ("cache", "cache_videos"):
+            directory = utils.storage_dir("cache_videos")
+        elif target in ("local", "local_videos"):
+            directory = utils.storage_dir("local_videos")
+        else:
+            directory = target
+        checked, removed = sweep_directory(directory)
+        logger.info(f"sweep complete: checked={checked}, removed={removed}")
+        return 0
+    logger.error("usage: python -m app.services.vision_filter [check|sweep [cache|local|<dir>]]")
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(_main(sys.argv))

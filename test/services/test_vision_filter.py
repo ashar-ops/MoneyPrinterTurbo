@@ -1,5 +1,7 @@
 import io
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,11 +27,13 @@ class VisionFilterTestBase(unittest.TestCase):
         self.original_app_config = dict(config.app)
         config.app["gemini_api_key"] = "vision-key"
         vision_filter._verdict_cache.clear()
+        vision_filter._file_verdict_cache.clear()
 
     def tearDown(self):
         config.app.clear()
         config.app.update(self.original_app_config)
         vision_filter._verdict_cache.clear()
+        vision_filter._file_verdict_cache.clear()
 
 
 class TestVerdictParsing(unittest.TestCase):
@@ -137,7 +141,7 @@ class TestFilterMaterialItems(VisionFilterTestBase):
             source_info={"thumbnail_url": thumbnail_url},
         )
 
-    def test_disabled_filter_returns_items_unchanged(self):
+    def test_disabled_filter_refuses_all_candidates(self):
         config.app.pop("gemini_api_key", None)
         items = [self._item("https://cdn/a.mp4", "https://img/a.jpg")]
 
@@ -145,7 +149,8 @@ class TestFilterMaterialItems(VisionFilterTestBase):
             kept = vision_filter.filter_material_items(items, context="river")
 
         model_call.assert_not_called()
-        self.assertEqual(kept, items)
+        # 没有 AI 检查就绝不把片段加进成片：视觉过滤不可用时清空所有候选。
+        self.assertEqual(kept, [])
 
     def test_rejected_items_are_removed_from_candidates(self):
         items = [
@@ -176,6 +181,94 @@ class TestFilterMaterialItems(VisionFilterTestBase):
 
         model_call.assert_not_called()
         self.assertEqual(kept, [no_thumb])
+
+
+class TestSafeIndicesParsing(unittest.TestCase):
+    def test_only_explicit_safe_counts(self):
+        text = "ASSET_1: SAFE\nASSET_2: WOMAN_PRESENT\nASSET_3: SAFE"
+        self.assertEqual(vision_filter.parse_safe_indices(text, 3), {1, 3})
+
+    def test_unclear_and_missing_are_unsafe(self):
+        # 模型漏答或答非所问 -> 不算 SAFE，由严格闸门判为不可用。
+        text = "ASSET_1: SAFE\nASSET_2: maybe\nno third line"
+        self.assertEqual(vision_filter.parse_safe_indices(text, 3), {1})
+
+
+class TestScreenVideoFile(VisionFilterTestBase):
+    def setUp(self):
+        super().setUp()
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        super().tearDown()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_temp_video(self, name="clip.mp4", content=b"fake-video-bytes"):
+        path = Path(self._tmp) / name
+        path.write_bytes(content)
+        return str(path)
+
+    def test_clip_with_woman_frame_is_rejected(self):
+        path = self._write_temp_video()
+        with patch.object(
+            vision_filter, "_extract_single_frame_png", return_value=_png_blob((1, 1, 1))
+        ), patch.object(
+            vision_filter, "_call_vision_model",
+            return_value="ASSET_1: WOMAN_PRESENT",
+        ):
+            self.assertFalse(
+                vision_filter.screen_video_file(path, "test", delete_unsafe=True)
+            )
+
+    def test_clean_clip_is_accepted(self):
+        path = self._write_temp_video()
+        with patch.object(
+            vision_filter, "_extract_single_frame_png", return_value=_png_blob()
+        ), patch.object(
+            vision_filter, "_call_vision_model",
+            return_value="ASSET_1: SAFE",
+        ):
+            self.assertTrue(
+                vision_filter.screen_video_file(path, "test", delete_unsafe=False)
+            )
+
+    def test_unclear_verdict_is_rejected_fail_closed(self):
+        path = self._write_temp_video()
+        with patch.object(
+            vision_filter, "_extract_single_frame_png", return_value=_png_blob()
+        ), patch.object(
+            vision_filter, "_call_vision_model",
+            return_value="ASSET_1: maybe",  # 不是明确的 SAFE -> 不清楚
+        ):
+            self.assertFalse(
+                vision_filter.screen_video_file(path, "test", delete_unsafe=False)
+            )
+
+    def test_model_error_is_rejected_fail_closed(self):
+        path = self._write_temp_video()
+        with patch.object(
+            vision_filter, "_extract_single_frame_png", return_value=_png_blob()
+        ), patch.object(
+            vision_filter, "_call_vision_model",
+            side_effect=RuntimeError("model offline"),
+        ):
+            self.assertFalse(
+                vision_filter.screen_video_file(path, "test", delete_unsafe=False)
+            )
+
+    def test_no_frame_extracted_is_rejected(self):
+        path = self._write_temp_video()
+        with patch.object(vision_filter, "_extract_single_frame_png", return_value=None):
+            self.assertFalse(
+                vision_filter.screen_video_file(path, "test", delete_unsafe=False)
+            )
+
+    def test_disabled_vision_rejects_clip(self):
+        config.app.pop("gemini_api_key", None)
+        path = self._write_temp_video()
+        self.assertFalse(
+            vision_filter.screen_video_file(path, "test", delete_unsafe=False)
+        )
 
 
 if __name__ == "__main__":

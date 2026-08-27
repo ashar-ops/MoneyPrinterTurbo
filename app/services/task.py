@@ -26,6 +26,7 @@ from app.services import (
     sheets_tracker,
     twelvelabs,
     video,
+    vision_filter,
     voice,
 )
 from app.services import upload_post
@@ -640,7 +641,30 @@ def get_video_materials(
                 "no valid local video materials were found",
             )
             return None
-        return [material_info.url for material_info in materials]
+        # 本地素材同样没有缩略图、也绕过了库存源过滤，必须对每个真实片段做
+        # 帧级视觉筛查，女性/不确定/抽帧失败的片段直接剔除（不删除用户文件）。
+        logger.info(
+            "🔍 ── AI VISION SAFETY GATE ── scanning local clips frame-by-frame "
+            "for women (strict: any woman / unclear / error ⇒ clip dropped)"
+        )
+        safe_materials = []
+        for material_info in materials:
+            if vision_filter.screen_video_file(
+                material_info.url, "local", delete_unsafe=False
+            ):
+                safe_materials.append(material_info)
+            else:
+                logger.warning(
+                    f"local clip rejected by vision safety: {material_info.url}"
+                )
+        if not safe_materials:
+            _mark_task_failed(
+                task_id,
+                "materials",
+                "no local video materials passed the vision safety screening",
+            )
+            return None
+        return [material_info.url for material_info in safe_materials]
     elif params.video_source == "loomloom":
         if not isinstance(
             loomloom_video_request, loomloom.LoomLoomConfirmedVideoRequest
@@ -685,12 +709,24 @@ def get_video_materials(
                 listing_version_id=request.listing_version_id,
             )
             backend.wait_for_run(run_id)
-            return list(
+            paths = list(
                 backend.download_video_results(
                     run_id,
                     utils.task_dir(task_id),
                 )
             )
+            # 付费生成的素材同样要过帧级视觉筛查，女性/不确定的片段剔除。
+            safe_paths = vision_filter.screen_video_paths(
+                paths, "loomloom", delete_unsafe=False
+            )
+            if not safe_paths:
+                _mark_task_failed(
+                    task_id,
+                    "materials",
+                    "no LoomLoom video materials passed the vision safety screening",
+                )
+                return None
+            return safe_paths
         except (loomloom.LoomLoomError, ValueError) as exc:
             _mark_task_failed(
                 task_id,

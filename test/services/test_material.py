@@ -18,8 +18,15 @@ class TestMaterialTlsVerification(unittest.TestCase):
     def setUp(self):
         self.original_app_config = dict(config.app)
         self.original_proxy_config = dict(config.proxy)
+        # 严格视觉闸门在测试中默认放行：模拟“AI 检查通过”，便于验证其它逻辑。
+        config.app["gemini_api_key"] = "test-key"
+        self._vision_patch = patch.object(
+            material.vision_filter, "screen_video_file", return_value=True
+        )
+        self._vision_patch.start()
 
     def tearDown(self):
+        self._vision_patch.stop()
         config.app.clear()
         config.app.update(self.original_app_config)
         config.proxy.clear()
@@ -801,12 +808,19 @@ class TestCoverrProvider(unittest.TestCase):
     def setUp(self):
         self.original_app_config = dict(config.app)
         self.original_proxy_config = dict(config.proxy)
+        config.app["gemini_api_key"] = "test-key"
+        self._vision_patch = patch.object(
+            material.vision_filter, "screen_video_file", return_value=True
+        )
+        self._vision_patch.start()
 
     def tearDown(self):
+        self._vision_patch.stop()
         config.app.clear()
         config.app.update(self.original_app_config)
         config.proxy.clear()
         config.proxy.update(self.original_proxy_config)
+
 
     # ---------------- Tests for search_videos_coverr ----------------
 
@@ -1079,10 +1093,16 @@ class TestWaveSpeedProvider(unittest.TestCase):
         self.original_app_config = dict(config.app)
         self.original_proxy_config = dict(config.proxy)
         config.app["wavespeed_api_keys"] = ["wavespeed-key"]
+        config.app["gemini_api_key"] = "test-key"
         config.app.pop("tls_verify", None)
         config.proxy.clear()
+        self._vision_patch = patch.object(
+            material.vision_filter, "screen_video_file", return_value=True
+        )
+        self._vision_patch.start()
 
     def tearDown(self):
+        self._vision_patch.stop()
         config.app.clear()
         config.app.update(self.original_app_config)
         config.proxy.clear()

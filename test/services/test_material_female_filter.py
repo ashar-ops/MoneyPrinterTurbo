@@ -53,6 +53,7 @@ class TestSearchTermSanitization(unittest.TestCase):
 
     def test_download_videos_sanitizes_terms_before_provider_search(self):
         config.app["pexels_api_keys"] = ["k"]
+        config.app["gemini_api_key"] = "test-key"
         captured_terms = []
 
         def fake_search(search_term, minimum_duration, video_aspect):
@@ -60,7 +61,9 @@ class TestSearchTermSanitization(unittest.TestCase):
             return []
 
         with patch.object(material, "search_videos_pexels", side_effect=fake_search), \
-             patch.object(material.vision_filter, "is_enabled", return_value=False):
+             patch.object(
+                 material.vision_filter, "screen_video_file", return_value=True
+             ):
             material.download_videos(
                 "task-x",
                 ["woman cooking pasta"],
@@ -208,7 +211,20 @@ class TestCoverrMetadataFilter(FemaleFilterTestBase):
 
 
 class TestWaveSpeedVisionCheck(FemaleFilterTestBase):
+    def setUp(self):
+        super().setUp()
+        config.app["gemini_api_key"] = "test-key"
+
+    def _png(self):
+        from PIL import Image
+        import io
+
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), (10, 20, 30)).save(buf, format="PNG")
+        return buf.getvalue()
+
     def test_unsafe_generated_clip_is_deleted(self):
+        """严格闸门：模型判为女性 -> 片段被拒绝且文件被删除。"""
         import os
         import tempfile
 
@@ -218,26 +234,30 @@ class TestWaveSpeedVisionCheck(FemaleFilterTestBase):
                 f.write(b"fake")
 
             with patch.object(
-                material, "_extract_first_frame_png", return_value=b"frame"
+                material.vision_filter,
+                "_extract_single_frame_png",
+                return_value=self._png(),
             ), patch.object(
                 material.vision_filter,
-                "screen_image_blobs",
-                return_value=(set(), {video_path}),
-            ) as screen:
-                passed = material._generated_clip_passes_vision_check(
-                    video_path, "cooking pasta"
+                "_call_vision_model",
+                return_value="ASSET_1: WOMAN_PRESENT",
+            ):
+                passed = material.vision_filter.screen_video_file(
+                    video_path, "cooking pasta", delete_unsafe=True
                 )
 
             self.assertFalse(passed)
             self.assertFalse(os.path.exists(video_path))
-            screen.assert_called_once()
 
-    def test_frame_extraction_failure_fails_open(self):
+    def test_frame_extraction_failure_is_rejected_fail_closed(self):
+        """抽帧失败也按不可用处理（fail-closed），绝不把未验证片段放进成片。"""
         with patch.object(
-            material, "_extract_first_frame_png", return_value=None
+            material.vision_filter, "_extract_single_frame_png", return_value=None
         ):
-            self.assertTrue(
-                material._generated_clip_passes_vision_check("whatever.mp4", "term")
+            self.assertFalse(
+                material.vision_filter.screen_video_file(
+                    "whatever.mp4", "term", delete_unsafe=False
+                )
             )
 
 

@@ -8,6 +8,51 @@ PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 )
 
+
+def _ensure_utf8_stream(stream) -> None:
+    """
+    尽量把控制台流改成 UTF-8，避免 Windows 默认 cp1252 编码把表情符号、
+    制表符等字符写崩（``UnicodeEncodeError``）。失败也无所谓，下面还有一层
+    安全的字节 sink 兜底。
+    """
+    if stream is None:
+        return
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError, LookupError):
+            pass
+
+
+def _utf8_sink(stream):
+    """
+    返回一个 loguru sink：把整条记录以 UTF-8 字节写出，遇到无法编码的字符
+    用 ``replace`` 兜底，绝不因为某个字符导致整条日志流水线崩溃。
+
+    Windows 终端默认是 cp1252，emoji / ``│`` 这类字符会触发 ``UnicodeEncodeError``，
+    直接写 ``stream.write`` 会让 loguru 丢掉这条记录并报 “Logging error”。
+    改为写 ``stream.buffer`` 的 UTF-8 字节即可彻底规避。
+    """
+    raw = getattr(stream, "buffer", None)
+
+    def sink(message: str) -> None:
+        text = message if isinstance(message, str) else str(message)
+        if raw is not None:
+            try:
+                raw.write(text.encode("utf-8", "replace"))
+                raw.flush()
+                return
+            except Exception:
+                pass
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            stream.write(text.encode("utf-8", "replace").decode("utf-8", "replace"))
+
+    return sink
+
+
 # 终端日志采用三段式布局：时间 │ 级别徽章 │ 位置 › 消息。
 # - 时间与位置使用暗色/青色弱化，突出消息本体；
 # - 级别通过 <level> 标签自动按严重度着色（DEBUG 灰、INFO 蓝、SUCCESS 绿、
@@ -84,8 +129,12 @@ def configure_terminal_logger(sink, level: str, colorize: bool = True) -> int:
                 # 不需要影响其它仍有效的日志 sink。
                 pass
 
+        # 终端流强制 UTF-8，并用安全的字节 sink 包裹，避免 Windows cp1252 下
+        # emoji / 制表符把整条日志写崩。
+        _ensure_utf8_stream(sink)
+        safe_sink = _utf8_sink(sink)
         _terminal_handler_id = logger.add(
-            sink,
+            safe_sink,
             level=level,
             format=format_log_record,
             colorize=colorize,
