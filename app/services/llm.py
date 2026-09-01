@@ -837,58 +837,55 @@ def _strip_code_fence(text: str) -> str:
 def generate_terms(
     video_subject: str,
     video_script: str,
-    amount: int = 5,
+    amount: int = 12,
     match_script_order: bool = False,
     app_config=None,
 ) -> List[str]:
     if match_script_order:
         goal = (
             f"Generate {amount} chronological stock-video search terms that follow "
-            "the order of topics in the video script."
+            "the visual progression and topics in the video script."
         )
         ordering_rule = (
-            "7. keep the terms in the same order as the script narration; "
-            "earlier terms must describe earlier visual moments."
+            "7. keep the terms in the chronological order of the script narration; "
+            "earlier terms must visually match earlier script segments."
         )
-        # 有序关键词模式下，示例数量要和 amount 保持一致，避免模型被固定
-        # 的 4 个示例误导，导致长文案只返回少量关键词，影响素材覆盖度。
         example_terms = [
-            "opening visual topic",
-            *[f"script visual topic {index}" for index in range(2, max(amount, 1))],
-            "final visual topic",
+            "opening visual scene",
+            *[f"script visual b-roll {index}" for index in range(2, max(amount, 1))],
+            "closing visual scene",
         ]
         output_example = json.dumps(example_terms[:amount], ensure_ascii=False)
     else:
         goal = (
-            f"Generate {amount} search terms for stock videos, depending on "
-            "the subject of a video."
+            f"Generate {amount} diverse and highly relevant visual search terms for stock video libraries (like Pexels) based on the video script and subject."
         )
         ordering_rule = ""
         output_example = (
-            '["search term 1", "search term 2", "search term 3",'
-            '"search term 4", "search term 5"]'
+            '["stock market charts", "counting cash money", "city skyline timelapse", '
+            '"gold coins falling", "modern office desk laptop", "crypto trading screen"]'
         )
 
     # 素材安全约束：性别词会把库存搜索结果和 AI 生成画面都带偏成人物特写。
     # 在关键词生成源头就禁止这类词，比下载后再过滤更省配额也更可靠。
     people_rule = (
         "6. do not include gendered human words such as 'woman', 'women', 'girl', "
-        "'female' or 'lady' in any search term; describe objects, places, animals, "
-        "and actions instead of people."
+        "'female' or 'lady' in any search term; prioritize objects, places, technology, "
+        "nature, atmospheric scenes, and actions."
     )
 
     prompt = f"""
-# Role: Video Search Terms Generator
+# Role: High-Converting Stock Video Search Terms Generator
 
 ## Goals:
 {goal}
 
 ## Constrains:
-1. the search terms are to be returned as a json-array of strings.
-2. each search term should consist of 1-3 words, always add the main subject of the video.
-3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
-4. the search terms must be related to the subject of the video.
-5. reply with english search terms only.
+1. the search terms MUST be returned strictly as a JSON array of strings.
+2. each search term should consist of 2 to 4 concise English words describing concrete visual b-roll scenes, objects, actions, environments, or cinematic shots that illustrate the script.
+3. do NOT repeat the entire video subject title in every search term; provide diverse, varied visual keywords suitable for stock video search engines (e.g., Pexels, Pixabay).
+4. keywords must be concrete and visually searchable (e.g., 'financial chart graph', 'luxury mansion exterior', 'highway traffic night', 'modern server room', 'hands typing keyboard', 'vault cash stacks').
+5. reply with English search terms only.
 {people_rule}
 {ordering_rule}
 

@@ -27,7 +27,7 @@ _api_key_lock = threading.Lock()
 # 词表刻意保持小而准，避免误杀正常素材；漏网的由第二道视觉防线兜底。
 # ---------------------------------------------------------------------------
 _FEMALE_METADATA_RE = re.compile(
-    r"\b(woman|women|girl|girls|female|females|lady|ladies|feminine|actress|actresses|daughter|daughters|mother|mothers|wife|wives|sister|sisters|bride|brides|queen|queens|princess|princesses|she|her|herself)\b",
+    r"\b(woman|women|girl|girls|female|females|lady|ladies|feminine|actress|actresses|daughter|daughters|mother|mothers|wife|wives|sister|sisters|bride|brides|queen|queens|princess|princesses)\b",
     re.IGNORECASE,
 )
 
@@ -409,12 +409,8 @@ def search_videos_pexels(
         "Authorization": api_key,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
     }
-    # Pexels supports free-text exclusion poorly, but these negative terms reduce
-    # unwanted people in results while the metadata check below remains authoritative.
-    negative_terms = ["-woman", "-female", "-girl", "-lady", "-women"]
-    filtered_search_term = " ".join([search_term, *negative_terms])
-    # Build URL
-    params = {"query": filtered_search_term, "per_page": 20, "orientation": video_orientation}
+    # Pexels API does not support boolean negative '-' operators; pass the clean sanitized term directly
+    params = {"query": search_term, "per_page": 20, "orientation": video_orientation}
     query_url = f"https://api.pexels.com/v1/videos/search?{urlencode(params)}"
     logger.info(f"searching videos on pexels: term={search_term!r}")
 

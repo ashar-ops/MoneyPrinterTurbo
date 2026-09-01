@@ -84,7 +84,7 @@ class VideoParams(BaseModel):
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
-    video_clip_duration: int = Field(default=5, ge=1)
+    video_clip_duration: int = Field(default=3, ge=1)
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
     video_count: int = Field(default=1, ge=1)
@@ -194,7 +194,7 @@ class VideoTermsParams:
     video_script: Optional[str] = (
         "春天的花海，如诗如画般展现在眼前。万物复苏的季节里，大地披上了一袭绚丽多彩的盛装。金黄的迎春、粉嫩的樱花、洁白的梨花、艳丽的郁金香……"
     )
-    amount: Optional[int] = 5
+    amount: Optional[int] = 12
     match_materials_to_script: bool = False
 
 

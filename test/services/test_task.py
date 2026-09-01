@@ -664,7 +664,7 @@ class TestTaskService(unittest.TestCase):
         generate.assert_called_once_with(
             video_subject="城市通勤",
             video_script="先城市，再地铁",
-            amount=8,
+            amount=15,
             match_script_order=True,
         )
 

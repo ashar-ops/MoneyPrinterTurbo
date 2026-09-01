@@ -69,10 +69,10 @@ audio_codec = "aac"
 # 这里显式抬高音频码率，避免成片阶段因为默认值过低而引入明显失真。
 audio_bitrate = "192k"
 fps = 30
-# FFmpeg 按帧率拼接/转码时，最终时长可能比 MoviePy 读到的理论时长短几十毫秒。
-# 这里给视频素材多留一个很小的安全余量，避免音频末尾因为帧舍入出现黑屏、
-# 卡顿或最后一小段旁白没有画面的情况。
-_VIDEO_DURATION_SAFETY_MARGIN = 0.1
+# FFmpeg 按帧率拼接/转码及视频收尾留白。
+# 给视频素材留足自然收尾缓冲（1.5 秒），确保旁白念完后画面和背景音乐平稳延续，
+# 不会在最后一个字刚结束时突兀掐断（告别 0.10 秒瞬断问题）。
+_VIDEO_DURATION_SAFETY_MARGIN = 1.5
 _MIN_MATERIAL_DIMENSION = 480
 # 消息类应用和部分编码器会把画面尺寸向下取整，例如 WhatsApp 会把 9:16 的
 # 素材压成 478x850，比 480 少两个像素。直接按 480 硬卡会让这类素材全部被
@@ -95,9 +95,8 @@ def _get_required_video_duration(audio_duration: float) -> float:
     """
     返回视频素材拼接的目标时长。
 
-    使用场景：合成视频时需要素材时长覆盖旁白音频。只做到“刚好等于”
-    音频时长时，FFmpeg 可能因为帧率舍入让最终视频略短，因此统一加一个
-    轻量余量。函数独立出来，便于测试和后续按实际反馈调整余量大小。
+    使用场景：合成视频时需要素材时长覆盖旁白音频并留出收尾缓冲。
+    通过在音频时长基础上增加安全收尾余量（1.5s），保证成片末尾有充足缓冲。
     """
     return max(0.0, float(audio_duration) + _VIDEO_DURATION_SAFETY_MARGIN)
 
@@ -752,7 +751,7 @@ def combine_videos(
         output_file=combined_video_path,
         threads=threads,
         output_dir=output_dir,
-        max_duration=audio_duration,
+        max_duration=required_video_duration,
     )
     
     # clean temp files
@@ -1280,13 +1279,14 @@ def generate_video(
                     f"file={bgm_file}"
                 )
 
-        final_video_clip = video_clip.with_audio(audio_clip).with_duration(audio_duration)
+        target_total_duration = _get_required_video_duration(audio_duration)
+        final_video_clip = video_clip.with_audio(audio_clip).with_duration(target_total_duration)
         clip_stack.callback(final_video_clip.close)
         # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
         # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
         output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
         # MoviePy performs the main render; a final FFmpeg pass applies exact
-        # end-of-program fades and trims at the measured narration duration.
+        # end-of-program fades and trims at the measured video duration with end buffer.
         prefade_output = output_file + ".prefade.mp4"
         _write_videofile_with_codec_fallback(
             final_video_clip,
@@ -1300,10 +1300,10 @@ def generate_video(
             logger=None,
             fps=fps,
         )
-        fade_start = max(0.0, audio_duration - 1.0)
+        fade_start = max(0.0, target_total_duration - 1.0)
         ffmpeg_command = [
             utils.get_ffmpeg_binary(), "-y", "-i", prefade_output,
-            "-t", f"{audio_duration:.6f}",
+            "-t", f"{target_total_duration:.6f}",
             "-vf", f"fade=t=out:st={fade_start:.6f}:d=1",
             "-af", f"afade=t=out:st={fade_start:.6f}:d=1",
             "-c:v", "libx264", "-c:a", audio_codec, "-pix_fmt", "yuv420p",

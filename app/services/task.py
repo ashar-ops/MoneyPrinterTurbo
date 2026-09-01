@@ -323,7 +323,7 @@ def generate_terms(task_id, params, video_script):
         video_terms = llm.generate_terms(
             video_subject=params.video_subject,
             video_script=video_script,
-            amount=8 if params.match_materials_to_script else 5,
+            amount=15 if params.match_materials_to_script else 12,
             match_script_order=params.match_materials_to_script,
         )
     else:
@@ -752,7 +752,7 @@ def get_video_materials(
                 if params.match_materials_to_script
                 else params.video_concat_mode
             ),
-            audio_duration=audio_duration * params.video_count,
+            audio_duration=video._get_required_video_duration(audio_duration) * params.video_count,
             max_clip_duration=params.video_clip_duration,
             match_script_order=params.match_materials_to_script,
         )

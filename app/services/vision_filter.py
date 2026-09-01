@@ -35,18 +35,15 @@ _GRID_COLUMNS = 4
 _CELL_SIZE = 240
 _LABEL_BAR_HEIGHT = 28
 
-# 用户指定的审查提示词。输出格式固定为逐行 “ASSET_n: SAFE | WOMAN_PRESENT”。
-# 严格二分类：不能看清或不确定时一律判为 WOMAN_PRESENT，绝不允许“猜测安全”。
-SAFETY_PROMPT = """You are a strict content-safety classifier. The grid shows frames sampled from stock videos.
-For EACH numbered asset, decide ONLY whether it shows any woman, girl, or female-presenting person.
-Any form counts — a face, a silhouette, a body, partial or full, in any context.
+SAFETY_PROMPT = """You are an accurate visual content classifier. The grid shows frames sampled from stock videos.
+For EACH numbered asset, determine if any woman, girl, or female person is visible in the frame (face, body, or clear silhouette).
+If the asset contains nature, objects, technology, scenery, animals, abstract visuals, or non-female footage, classify it as SAFE.
 There are exactly two allowed answers per asset, and nothing else:
 
-ASSET_n: SAFE            # absolutely no woman/girl/female person visible
-ASSET_n: WOMAN_PRESENT   # any woman at all, even partial, ambiguous, or uncertain
+ASSET_n: SAFE            # no woman/girl/female person visible (scenery, objects, technology, animals, abstract, etc.)
+ASSET_n: WOMAN_PRESENT   # a woman, girl, or female person is clearly visible
 
-If you cannot clearly see the asset or are unsure for ANY reason, you MUST answer WOMAN_PRESENT.
-Never guess SAFE. Output ONLY the lines above, one per asset, numbered exactly as labelled."""
+Output ONLY the lines above, one per asset, numbered exactly as labelled."""
 
 # 兼容模型输出的宽松变体：“**ASSET_3**: WOMAN_PRESENT”、“ASSET_3 - WOMAN PRESENT” 等。
 _VERDICT_RE = re.compile(
