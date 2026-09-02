@@ -179,7 +179,7 @@ class TestScriptPromptOptions(unittest.TestCase):
 
         self.assertEqual(result, ["opening city", "middle office", "final sunset"])
         self.assertIn("chronological stock-video search terms", captured["prompt"])
-        self.assertIn("same order as the script narration", captured["prompt"])
+        self.assertIn("STRICT CHRONOLOGICAL ORDER", captured["prompt"])
 
     def test_generate_terms_returns_empty_list_on_provider_error(self):
         """

@@ -843,63 +843,60 @@ def generate_terms(
 ) -> List[str]:
     if match_script_order:
         goal = (
-            f"Generate {amount} chronological stock-video search terms that follow "
-            "the visual progression and topics in the video script."
+            f"Generate {amount} highly relevant, chronological stock-video search terms that directly "
+            f"illustrate the specific scenes in the script while strictly staying on-topic with '{video_subject}'."
         )
         ordering_rule = (
-            "7. keep the terms in the chronological order of the script narration; "
-            "earlier terms must visually match earlier script segments."
+            "7. STRICT CHRONOLOGICAL ORDER: Terms must follow the exact narrative flow of the script from start to finish."
         )
         example_terms = [
-            "opening visual scene",
-            *[f"script visual b-roll {index}" for index in range(2, max(amount, 1))],
-            "closing visual scene",
+            f"{video_subject} opening scene",
+            *[f"{video_subject} topic {index}" for index in range(2, max(amount, 1))],
+            f"{video_subject} finale scene",
         ]
         output_example = json.dumps(example_terms[:amount], ensure_ascii=False)
     else:
         goal = (
-            f"Generate {amount} diverse and highly relevant visual search terms for stock video libraries (like Pexels) based on the video script and subject."
+            f"Generate {amount} highly relevant and visually precise stock-video search terms strictly centered on '{video_subject}' "
+            "and the specific concepts discussed in the video script."
         )
         ordering_rule = ""
         output_example = (
-            '["stock market charts", "counting cash money", "city skyline timelapse", '
-            '"gold coins falling", "modern office desk laptop", "crypto trading screen"]'
+            '["bitcoin crypto trading chart", "gold bullion vault coins", "digital blockchain technology network", '
+            '"stock exchange trading floor", "investor calculating profit laptop", "crypto hardware wallet secure"]'
         )
 
     # 素材安全约束：性别词会把库存搜索结果和 AI 生成画面都带偏成人物特写。
-    # 在关键词生成源头就禁止这类词，比下载后再过滤更省配额也更可靠。
     people_rule = (
-        "6. do not include gendered human words such as 'woman', 'women', 'girl', "
-        "'female' or 'lady' in any search term; prioritize objects, places, technology, "
-        "nature, atmospheric scenes, and actions."
+        "6. DO NOT include gendered human words ('woman', 'women', 'girl', 'female', 'lady') in search terms; "
+        "focus on subject-specific objects, environments, technology, graphics, charts, concepts, and actions."
     )
 
     prompt = f"""
-# Role: High-Converting Stock Video Search Terms Generator
+# Role: Highly-Relevant Stock Video Search Terms Generator
 
-## Goals:
+## Goal:
 {goal}
 
-## Constrains:
-1. the search terms MUST be returned strictly as a JSON array of strings.
-2. each search term should consist of 2 to 4 concise English words describing concrete visual b-roll scenes, objects, actions, environments, or cinematic shots that illustrate the script.
-3. do NOT repeat the entire video subject title in every search term; provide diverse, varied visual keywords suitable for stock video search engines (e.g., Pexels, Pixabay).
-4. keywords must be concrete and visually searchable (e.g., 'financial chart graph', 'luxury mansion exterior', 'highway traffic night', 'modern server room', 'hands typing keyboard', 'vault cash stacks').
-5. reply with English search terms only.
+## Critical Requirements for HIGH RELEVANCE:
+1. STRICT THEMATIC RELEVANCE: Every search term MUST be directly and tightly connected to the main subject ("{video_subject}") and the specific text spoken in the script.
+2. NO IRRELEVANT / TANGENTIAL FOOTAGE: Do NOT generate generic or loose b-roll (such as generic nature, random highways, unrelated coffee cups, or vague abstract backgrounds). Every term must immediately make sense for a video about "{video_subject}".
+3. HIGH SEARCH PRECISION: Each search term should be 2 to 4 concise English words combining the subject context with the specific concept (e.g. for finance: "stock trading candlestick chart", "cash money vault", "bank investment growth graph").
+4. VISUALLY COHESIVE: All generated search terms must look like they belong in the exact same professional, focused video about "{video_subject}".
+5. RETURN FORMAT: Return ONLY a valid JSON array of strings, with no explanation, markdown formatting outside the array, or extra text.
 {people_rule}
 {ordering_rule}
 
 ## Output Example:
 {output_example}
 
-## Context:
-### Video Subject
+## Video Subject:
 {video_subject}
 
-### Video Script
+## Video Script:
 {video_script}
 
-Please note that you must use English for generating video search terms; Chinese is not accepted.
+Please note: You must use English for generating video search terms. Ensure maximum relevance to "{video_subject}" and the script above.
 """.strip()
 
     logger.info(f"subject: {video_subject}, match_script_order: {match_script_order}")
